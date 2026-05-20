@@ -69,6 +69,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"Tu chat ID es: `{chat_id}`", parse_mode="Markdown")
+
+
 async def cmd_setkindle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     args = context.args
@@ -478,6 +483,7 @@ def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("myid",      cmd_myid))
     app.add_handler(CommandHandler("setkindle", cmd_setkindle))
     app.add_handler(CommandHandler("setformat", cmd_setformat))
 
