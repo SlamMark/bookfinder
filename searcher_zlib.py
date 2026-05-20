@@ -1,90 +1,74 @@
 """
 BookFinder — Z-Library search backend
 
-Searches Z-Library using the 'zlibrary' async wrapper.
+Uses our vendored zlib_client (official /eapi/ endpoints).
 Returns a normalised list of book dicts.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Optional
 
-import zlibrary
-from zlibrary import Language, Extension
-
+from zlib_client import Zlibrary
 from config import ZLIB_EMAIL, ZLIB_PASSWORD
 
 
-# ── Language code → zlibrary.Language mapping ────────────────────────────────
-_LANG_MAP: dict[str, Language] = {
-    "es": Language.SPANISH,
-    "en": Language.ENGLISH,
-    "fr": Language.FRENCH,
-    "de": Language.GERMAN,
-    "it": Language.ITALIAN,
-    "pt": Language.PORTUGUESE,
-    "ru": Language.RUSSIAN,
-    "zh": Language.CHINESE,
-    "ja": Language.JAPANESE,
-    "ko": Language.KOREAN,
-    "ar": Language.ARABIC,
-    "nl": Language.DUTCH,
-    "pl": Language.POLISH,
-    "sv": Language.SWEDISH,
-    "tr": Language.TURKISH,
+# ── Language code → Z-Library language name ──────────────────────────────────
+_LANG_MAP: dict[str, str] = {
+    "es": "spanish",
+    "en": "english",
+    "fr": "french",
+    "de": "german",
+    "it": "italian",
+    "pt": "portuguese",
+    "ca": "catalan",
+    "ru": "russian",
+    "zh": "chinese",
+    "ja": "japanese",
+    "ko": "korean",
+    "ar": "arabic",
+    "nl": "dutch",
+    "pl": "polish",
+    "sv": "swedish",
+    "tr": "turkish",
 }
 
 
-def _result_to_dict(item: dict) -> dict:
-    """Normalise a zlibrary search-result item into our standard format."""
-    authors_raw = item.get("authors") or []
-    if isinstance(authors_raw, list):
-        author_str = ", ".join(a.get("author", "") for a in authors_raw if isinstance(a, dict))
-    else:
-        author_str = str(authors_raw)
+# ── Module-level client (login once per process) ─────────────────────────────
+_client: Optional[Zlibrary] = None
 
+
+def _get_client() -> Optional[Zlibrary]:
+    global _client
+    if _client is not None:
+        return _client
+    if not ZLIB_EMAIL or not ZLIB_PASSWORD:
+        return None
+    client = Zlibrary(email=ZLIB_EMAIL, password=ZLIB_PASSWORD)
+    if not client.isLoggedIn():
+        return None
+    _client = client
+    return _client
+
+
+def _book_to_dict(item: dict) -> dict:
+    """Normalise a Z-Library book object into our standard dict format."""
+    authors_raw = item.get("author", "") or ""
     return {
         "source":    "zlibrary",
-        "topic":     "",
-        "title":     item.get("name", ""),
-        "author":    author_str,
-        "year":      item.get("year", ""),
+        "topic":     item.get("categories", ""),
+        "title":     item.get("title", ""),
+        "author":    authors_raw,
+        "year":      str(item.get("year", "")),
         "language":  item.get("language", ""),
         "extension": item.get("extension", ""),
-        "size":      item.get("size", ""),
-        "pages":     "",
+        "size":      item.get("filesizeString", "") or str(item.get("filesize", "")),
+        "pages":     str(item.get("pages", "")),
         "publisher": item.get("publisher", ""),
-        "md5":       "",
+        "md5":       item.get("md5", ""),
         "mirrors":   [],
-        "_zlib_item": item,  # keep original for later fetching / download
+        "_zlib_item": item,  # keep original for download resolution
     }
-
-
-async def _search_async(
-    query: str,
-    lang: Optional[str] = None,
-    max_results: int = 25,
-) -> list[dict]:
-    """Internal async search."""
-    if not ZLIB_EMAIL or not ZLIB_PASSWORD:
-        return []
-
-    lib = zlibrary.AsyncZlib()
-    await lib.login(ZLIB_EMAIL, ZLIB_PASSWORD)
-
-    kwargs: dict = {"q": query, "count": max_results}
-    if lang and lang.lower() in _LANG_MAP:
-        kwargs["lang"] = [_LANG_MAP[lang.lower()]]
-
-    paginator = await lib.search(**kwargs)
-    result_set = await paginator.next()
-
-    results: list[dict] = []
-    for item in result_set or []:
-        results.append(_result_to_dict(item))
-
-    return results[:max_results]
 
 
 def search_zlibrary(
@@ -92,65 +76,30 @@ def search_zlibrary(
     lang: Optional[str] = None,
     max_results: int = 25,
 ) -> list[dict]:
-    """
-    Synchronous wrapper that searches Z-Library.
+    """Search Z-Library and return a list of normalised book dicts."""
+    client = _get_client()
+    if client is None:
+        return []
 
-    Parameters
-    ----------
-    query : str
-        Title, author or general search term.
-    lang : str | None
-        Two-letter language code (e.g. 'es'). None = any.
-    max_results : int
-        Maximum number of results to return.
+    languages = [_LANG_MAP[lang.lower()]] if lang and lang.lower() in _LANG_MAP else None
 
-    Returns
-    -------
-    list[dict]  – normalised book dicts.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    response = client.search(message=query, languages=languages, limit=max_results)
+    if not response or not response.get("success"):
+        return []
 
-    if loop and loop.is_running():
-        # Already inside an event loop (e.g. Jupyter, bot)
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(
-                asyncio.run, _search_async(query, lang, max_results)
-            ).result()
-    else:
-        return asyncio.run(_search_async(query, lang, max_results))
-
-
-async def resolve_download_url_async(book_dict: dict) -> str | None:
-    """
-    Fetch the full book record from Z-Library and return the download URL.
-    """
-    item = book_dict.get("_zlib_item")
-    if item is None:
-        return None
-
-    try:
-        book = await item.fetch()
-        return book.get("download_url")
-    except Exception:
-        return None
+    books = response.get("books", []) or []
+    return [_book_to_dict(b) for b in books[:max_results]]
 
 
 def resolve_download_url(book_dict: dict) -> str | None:
-    """Synchronous wrapper for resolve_download_url_async."""
+    """Resolve the direct download URL for a Z-Library book."""
+    client = _get_client()
+    if client is None:
+        return None
+    item = book_dict.get("_zlib_item")
+    if item is None:
+        return None
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(
-                asyncio.run, resolve_download_url_async(book_dict)
-            ).result()
-    else:
-        return asyncio.run(resolve_download_url_async(book_dict))
+        return client.getDownloadLink(item)
+    except Exception:
+        return None
