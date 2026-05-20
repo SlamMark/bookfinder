@@ -29,7 +29,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, BOT_MAX_RESULTS
+from config import TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, BOT_MAX_RESULTS, SMTP_FROM, SMTP_USER
 from converter import KINDLE_EMAIL_FORMATS, SUPPORTED_FORMATS, convert
 from downloader import download_book
 from mailer import send_to_kindle
@@ -131,7 +131,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Escríbeme el título de un libro para buscarlo.\n\n"
         "*Comandos:*\n"
         "/setkindle `email@kindle.com` — guarda tu email de Kindle\n"
-        "/setformat — elige tu formato por defecto",
+        "/setformat — elige tu formato por defecto\n"
+        "/testkindle — envía un archivo de prueba a tu Kindle",
         parse_mode="Markdown",
     )
 
@@ -223,10 +224,29 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     name = _safe(user_info.get("name", "Usuario"))
 
     await callback.edit_message_text(f"✅ *{name}* aprobado.", parse_mode="Markdown")
+    sender = SMTP_FROM or SMTP_USER or "_(no configurado)_"
     try:
         await context.bot.send_message(
             chat_id=user_chat_id,
-            text="✅ Tu solicitud ha sido aprobada. Ya puedes usar BookFinder.\n\nEscribe el título de un libro para empezar.",
+            parse_mode="Markdown",
+            text=(
+                "✅ *¡Acceso aprobado! Bienvenido a BookFinder* 📚\n\n"
+                "Escribe el título de cualquier libro para buscarlo y descargarlo.\n\n"
+                "─────────────────────\n"
+                "*Para enviar libros a tu Kindle:*\n\n"
+                "1️⃣ Añade este email a tu lista de remitentes aprobados en Amazon:\n"
+                f"`{sender}`\n\n"
+                "_Amazon → Manage Your Content and Devices → Preferences → "
+                "Personal Document Settings → Approved Personal Document E-mail List_\n\n"
+                "2️⃣ Guarda tu dirección Kindle:\n"
+                "`/setkindle tu@kindle.com`\n\n"
+                "3️⃣ Elige tu formato preferido:\n"
+                "`/setformat`\n\n"
+                "─────────────────────\n"
+                "¿Todo configurado? Prueba el envío con:\n"
+                "`/testkindle`\n\n"
+                "🟢 Libgen · 🟡 Z-Library"
+            ),
         )
     except Exception:
         pass
@@ -601,10 +621,10 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         await callback.edit_message_text(f"📨 Enviando al Kindle `{kindle_email}`…", parse_mode="Markdown")
         loop = asyncio.get_event_loop()
-        ok = await loop.run_in_executor(None, send_to_kindle, kindle_email, path, title)
+        smtp_error = await loop.run_in_executor(None, send_to_kindle, kindle_email, path, title)
         path.unlink(missing_ok=True)
 
-        if ok:
+        if smtp_error is None:
             await callback.edit_message_text(
                 f"✅ *{title}* enviado a `{kindle_email}` en {fmt.upper()}.\n\n"
                 f"Aparecerá en tu Kindle en unos minutos.",
@@ -612,8 +632,65 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
         else:
             await callback.edit_message_text(
-                "❌ Error al enviar el email. Comprueba la configuración SMTP en el servidor."
+                f"❌ Error al enviar al Kindle:\n{smtp_error}\n\n"
+                f"Prueba `/testkindle` para diagnosticar el problema.",
+                parse_mode="Markdown",
             )
+
+
+async def cmd_testkindle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        return
+
+    chat_id = update.effective_chat.id
+    kindle_email = get_kindle_email(chat_id)
+    sender = SMTP_FROM or SMTP_USER or "_(no configurado)_"
+
+    if not kindle_email:
+        await update.message.reply_text(
+            "❌ No tienes Kindle email configurado.\nUsa `/setkindle tu@kindle.com`",
+            parse_mode="Markdown",
+        )
+        return
+
+    msg = await update.message.reply_text(
+        f"🔬 *Test de envío al Kindle*\n\n"
+        f"📧 Kindle: `{kindle_email}`\n"
+        f"📤 Desde: `{sender}`\n\n"
+        f"⏳ Enviando archivo de prueba…",
+        parse_mode="Markdown",
+    )
+
+    import tempfile
+    tmp = Path(tempfile.mktemp(suffix=".txt"))
+    tmp.write_text(
+        "BookFinder — test de envío.\n"
+        "Si recibes esto, el envío al Kindle funciona correctamente."
+    )
+
+    loop = asyncio.get_event_loop()
+    smtp_error = await loop.run_in_executor(None, send_to_kindle, kindle_email, tmp, "BookFinder Test")
+    tmp.unlink(missing_ok=True)
+
+    if smtp_error is None:
+        await msg.edit_text(
+            f"✅ *Prueba enviada correctamente*\n\n"
+            f"📧 Kindle: `{kindle_email}`\n"
+            f"📤 Desde: `{sender}`\n\n"
+            f"Comprueba tu Kindle en unos minutos.\n"
+            f"Si no llega, verifica que `{sender}` está en tu lista de remitentes aprobados en Amazon.",
+            parse_mode="Markdown",
+        )
+    else:
+        await msg.edit_text(
+            f"❌ *Error al enviar*\n\n"
+            f"📧 Kindle: `{kindle_email}`\n"
+            f"📤 Desde: `{sender}`\n\n"
+            f"⚠️ {smtp_error}\n\n"
+            f"Asegúrate de que `{sender}` está en tu lista de remitentes aprobados en Amazon:\n"
+            f"_Amazon → Manage Your Content → Preferences → Personal Document Settings_",
+            parse_mode="Markdown",
+        )
 
 
 async def handle_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -670,10 +747,11 @@ def main() -> None:
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",     cmd_start))
-    app.add_handler(CommandHandler("myid",      cmd_myid))
-    app.add_handler(CommandHandler("setkindle", cmd_setkindle))
-    app.add_handler(CommandHandler("setformat", cmd_setformat))
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("myid",        cmd_myid))
+    app.add_handler(CommandHandler("setkindle",   cmd_setkindle))
+    app.add_handler(CommandHandler("setformat",   cmd_setformat))
+    app.add_handler(CommandHandler("testkindle",  cmd_testkindle))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
 

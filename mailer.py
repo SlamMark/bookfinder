@@ -17,16 +17,15 @@ from config import SMTP_FROM, SMTP_HOST, SMTP_PASS, SMTP_PORT, SMTP_USER
 logger = logging.getLogger(__name__)
 
 
-def send_to_kindle(kindle_email: str, file_path: Path, title: str) -> bool:
+def send_to_kindle(kindle_email: str, file_path: Path, title: str) -> str | None:
     """
     Send file_path as an email attachment to kindle_email.
 
-    Returns True on success, False on failure.
+    Returns None on success, or a human-readable error string on failure.
     The sender (SMTP_FROM) must be in the recipient's Amazon approved email list.
     """
     if not all([SMTP_HOST, SMTP_USER, SMTP_PASS]):
-        logger.error("SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASS missing).")
-        return False
+        return "SMTP no configurado en el servidor (faltan SMTP_HOST, SMTP_USER o SMTP_PASS)."
 
     msg = MIMEMultipart()
     msg["From"] = SMTP_FROM or SMTP_USER
@@ -47,7 +46,12 @@ def send_to_kindle(kindle_email: str, file_path: Path, title: str) -> bool:
             smtp.login(SMTP_USER, SMTP_PASS)
             smtp.send_message(msg)
         logger.info("Sent '%s' to %s", file_path.name, kindle_email)
-        return True
-    except Exception as e:
-        logger.error("SMTP error: %s", e)
-        return False
+        return None
+    except smtplib.SMTPAuthenticationError:
+        return "Autenticación SMTP fallida — revisa SMTP_USER y SMTP_PASS en el servidor."
+    except smtplib.SMTPRecipientsRefused:
+        return f"Dirección Kindle rechazada por el servidor: `{kindle_email}`"
+    except smtplib.SMTPException as e:
+        return f"Error SMTP: {e}"
+    except OSError as e:
+        return f"No se pudo conectar al servidor SMTP ({SMTP_HOST}:{SMTP_PORT}): {e}"
