@@ -52,7 +52,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_cache: dict[int, list[dict]] = {}
+_sessions: dict[int, dict] = {}   # {chat_id: {results, page, query}}
 TELEGRAM_MAX_FILE_MB = 50
 
 
@@ -244,16 +244,33 @@ async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def _list_keyboard(books: list[dict]) -> InlineKeyboardMarkup:
+def _list_keyboard(session: dict) -> InlineKeyboardMarkup:
+    results = session["results"]
+    page = session["page"]
+    start = page * BOT_MAX_RESULTS
+    page_books = results[start : start + BOT_MAX_RESULTS]
+    total_pages = max(1, (len(results) + BOT_MAX_RESULTS - 1) // BOT_MAX_RESULTS)
+
     buttons = []
-    for i, book in enumerate(books):
+    for i, book in enumerate(page_books):
+        abs_idx = start + i
         icon = "🟡" if book["source"] == "zlibrary" else "🟢"
         title = _safe(book["title"])[:28]
         author = _safe(book.get("author", ""))[:15]
         ext = (book.get("extension") or "?").upper()
         size = book.get("size", "")
         label = f"{icon} {title} · {author} · {ext} {size}".strip(" ·")
-        buttons.append([InlineKeyboardButton(label, callback_data=f"d:{i}")])
+        buttons.append([InlineKeyboardButton(label, callback_data=f"d:{abs_idx}")])
+
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"page:{page - 1}"))
+        nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page + 1 < total_pages:
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"page:{page + 1}"))
+        buttons.append(nav)
+
     return InlineKeyboardMarkup(buttons)
 
 
@@ -266,15 +283,16 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     msg = await update.message.reply_text(f"🔍 Buscando {query}…")
 
+    total_fetch = BOT_MAX_RESULTS * 5
     results: list[dict] = []
     try:
-        results.extend(search_zlibrary(query, max_results=BOT_MAX_RESULTS))
+        results.extend(search_zlibrary(query, max_results=total_fetch))
     except Exception as e:
         logger.warning("Z-Library error: %s", e)
 
-    if len(results) < BOT_MAX_RESULTS:
+    if len(results) < total_fetch:
         try:
-            results.extend(search_libgen(query, max_results=BOT_MAX_RESULTS - len(results)))
+            results.extend(search_libgen(query, max_results=total_fetch - len(results)))
         except Exception as e:
             logger.warning("Libgen error: %s", e)
 
@@ -282,10 +300,10 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await msg.edit_text("❌ No encontré nada. Prueba con otro título.")
         return
 
-    _cache[chat_id] = results[:BOT_MAX_RESULTS]
+    _sessions[chat_id] = {"results": results, "page": 0, "query": query}
     await msg.edit_text(
         f"📚 *{_safe(query)}* — elige un resultado:",
-        reply_markup=_list_keyboard(_cache[chat_id]),
+        reply_markup=_list_keyboard(_sessions[chat_id]),
         parse_mode="Markdown",
     )
 
@@ -363,7 +381,7 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     chat_id = update.effective_chat.id
     idx = int(callback.data.split(":")[1])
-    books = _cache.get(chat_id, [])
+    books = _sessions.get(chat_id, {}).get("results", [])
 
     if idx >= len(books):
         await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
@@ -431,7 +449,7 @@ async def _show_format_menu(
     await callback.answer()
 
     chat_id = update.effective_chat.id
-    books = _cache.get(chat_id, [])
+    books = _sessions.get(chat_id, {}).get("results", [])
 
     if idx >= len(books):
         await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
@@ -509,7 +527,7 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     _, action, idx_str, fmt = callback.data.split(":")
     idx = int(idx_str)
     chat_id = update.effective_chat.id
-    books = _cache.get(chat_id, [])
+    books = _sessions.get(chat_id, {}).get("results", [])
 
     if idx >= len(books):
         await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
@@ -573,6 +591,28 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
 
 
+async def handle_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    callback = update.callback_query
+    await callback.answer()
+
+    chat_id = update.effective_chat.id
+    session = _sessions.get(chat_id)
+    if not session:
+        await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
+        return
+
+    session["page"] = int(callback.data.split(":")[1])
+    await callback.edit_message_text(
+        f"📚 *{_safe(session['query'])}* — elige un resultado:",
+        reply_markup=_list_keyboard(session),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer()
+
+
 async def handle_cancel_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     callback = update.callback_query
     await callback.answer()
@@ -608,15 +648,17 @@ def main() -> None:
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
 
-    app.add_handler(CallbackQueryHandler(handle_detail,       pattern=r"^d:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_detail,        pattern=r"^d:\d+$"))
     app.add_handler(CallbackQueryHandler(handle_download_menu, pattern=r"^dl:\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_send_menu,    pattern=r"^send:\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_fmt,          pattern=r"^fmt:(dl|snd):\d+:\w+$"))
-    app.add_handler(CallbackQueryHandler(handle_setfmt,       pattern=r"^setfmt:\w+$"))
-    app.add_handler(CallbackQueryHandler(handle_cancel_fmt,   pattern=r"^cancel_fmt$"))
-    app.add_handler(CallbackQueryHandler(handle_back,         pattern=r"^back$"))
-    app.add_handler(CallbackQueryHandler(handle_approve,      pattern=r"^approve:\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_reject,       pattern=r"^reject:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_send_menu,     pattern=r"^send:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_fmt,           pattern=r"^fmt:(dl|snd):\d+:\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_setfmt,        pattern=r"^setfmt:\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_cancel_fmt,    pattern=r"^cancel_fmt$"))
+    app.add_handler(CallbackQueryHandler(handle_back,          pattern=r"^back$"))
+    app.add_handler(CallbackQueryHandler(handle_page,          pattern=r"^page:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_noop,          pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(handle_approve,       pattern=r"^approve:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_reject,        pattern=r"^reject:\d+$"))
 
     logger.info("BookFinder bot started.")
     app.run_polling(drop_pending_updates=True)
