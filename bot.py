@@ -139,6 +139,9 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_setkindle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        return
+
     chat_id = update.effective_chat.id
     args = context.args
 
@@ -167,6 +170,9 @@ async def cmd_setkindle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cmd_setformat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        return
+
     chat_id = update.effective_chat.id
     current = get_default_format(chat_id)
 
@@ -186,6 +192,10 @@ async def cmd_setformat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def handle_setfmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        await update.callback_query.answer()
+        return
+
     callback = update.callback_query
     await callback.answer()
     chat_id = update.effective_chat.id
@@ -469,11 +479,19 @@ async def _show_format_menu(
 
 
 async def handle_download_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        await update.callback_query.answer()
+        return
+
     idx = int(update.callback_query.data.split(":")[1])
     await _show_format_menu(update, context, idx, "dl", "Descargar")
 
 
 async def handle_send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        await update.callback_query.answer()
+        return
+
     idx = int(update.callback_query.data.split(":")[1])
     chat_id = update.effective_chat.id
 
@@ -521,6 +539,10 @@ async def _download_and_convert(
 # ── Handle format selection ───────────────────────────────────────────────────
 
 async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        await update.callback_query.answer()
+        return
+
     callback = update.callback_query
     await callback.answer()
 
@@ -592,6 +614,10 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def handle_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        await update.callback_query.answer()
+        return
+
     callback = update.callback_query
     await callback.answer()
 
