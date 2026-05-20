@@ -25,6 +25,4 @@ jobs:
           script: |
             cd /opt/bookfinder
             git pull
-            docker compose build
-            # Phase 2: replace the line above with:
-            # docker compose up -d --build
+            docker compose up -d --build

@@ -11,6 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Phase 1: CLI (run interactively with: docker run -it --rm --env-file .env bookfinder python main.py "query")
-# Phase 2: change to CMD ["python", "bot.py"]
-CMD ["python", "main.py", "--help"]
+# CLI: docker run -it --rm --env-file .env bookfinder python main.py "query"
+# Bot: managed by docker-compose (command: python bot.py)
+CMD ["python", "bot.py"]

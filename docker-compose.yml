@@ -5,5 +5,4 @@ services:
     env_file: .env
     volumes:
       - ./downloads:/app/downloads
-    # Phase 2: uncomment when bot.py is ready
-    # command: python bot.py
+    command: python bot.py
