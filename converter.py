@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_FORMATS = ["epub", "mobi", "azw3", "pdf"]
 
+# Amazon deprecated MOBI for Send to Kindle email (2022). Use EPUB, AZW3 or PDF.
+KINDLE_EMAIL_FORMATS = ["epub", "azw3", "pdf"]
+
 
 def convert(src: Path, target_format: str) -> Path | None:
     """

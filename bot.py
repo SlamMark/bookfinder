@@ -30,7 +30,7 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_TOKEN, BOT_MAX_RESULTS
-from converter import SUPPORTED_FORMATS, convert
+from converter import KINDLE_EMAIL_FORMATS, SUPPORTED_FORMATS, convert
 from downloader import download_book
 from mailer import send_to_kindle
 from searcher_libgen import search_libgen
@@ -277,9 +277,11 @@ def _format_keyboard(idx: int, action: str, original_fmt: str, default_fmt: str 
     """
     action: 'dl' for download, 'snd' for send.
     Marks default format with ✓, original book format with (original).
+    Send uses KINDLE_EMAIL_FORMATS only (Amazon dropped MOBI support in 2022).
     """
+    formats = KINDLE_EMAIL_FORMATS if action == "snd" else SUPPORTED_FORMATS
     buttons = []
-    for fmt in SUPPORTED_FORMATS:
+    for fmt in formats:
         parts = []
         if fmt == (default_fmt or "").lower():
             parts.append("✓")
