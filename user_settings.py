@@ -46,3 +46,23 @@ def get_kindle_email(chat_id: int) -> str | None:
 
 def get_default_format(chat_id: int) -> str | None:
     return get(chat_id).get("default_format")
+
+
+def get_status(chat_id: int) -> str | None:
+    """Returns 'approved', 'pending', 'rejected', or None if unknown user."""
+    return get(chat_id).get("status")
+
+
+def register_user(chat_id: int, name: str, username: str | None) -> None:
+    data = _load()
+    entry = data.setdefault(str(chat_id), {})
+    entry["status"]   = "pending"
+    entry["name"]     = name
+    entry["username"] = username or ""
+    _save(data)
+
+
+def set_status(chat_id: int, status: str) -> None:
+    data = _load()
+    data.setdefault(str(chat_id), {})["status"] = status
+    _save(data)

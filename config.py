@@ -27,7 +27,8 @@ DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", str(Path(__file__).parent / "downl
 LIBGEN_MIRROR = os.environ.get("LIBGEN_MIRROR", "li")
 
 # ── Telegram bot ─────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_ADMIN_ID = int(os.environ.get("TELEGRAM_ADMIN_ID", "0"))
 
 # ── SMTP (e.g. Gmail App Password) ───────────────────────────────────────────
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")

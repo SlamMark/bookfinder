@@ -29,17 +29,21 @@ from telegram.ext import (
     filters,
 )
 
-from config import TELEGRAM_TOKEN, BOT_MAX_RESULTS
+from config import TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, BOT_MAX_RESULTS
 from converter import KINDLE_EMAIL_FORMATS, SUPPORTED_FORMATS, convert
 from downloader import download_book
 from mailer import send_to_kindle
 from searcher_libgen import search_libgen
 from searcher_zlib import get_book_details, search_zlibrary
 from user_settings import (
+    get,
     get_default_format,
     get_kindle_email,
+    get_status,
+    register_user,
     set_default_format,
     set_kindle_email,
+    set_status,
 )
 
 logging.basicConfig(
@@ -54,6 +58,66 @@ TELEGRAM_MAX_FILE_MB = 50
 
 def _safe(text) -> str:
     return re.sub(r"[*_`\[\]]", "", str(text or "")).strip()
+
+
+def _is_admin(chat_id: int) -> bool:
+    return TELEGRAM_ADMIN_ID and chat_id == TELEGRAM_ADMIN_ID
+
+
+# ── Access control ────────────────────────────────────────────────────────────
+
+async def _check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Returns True if the user can proceed.
+    Handles registration and notifies admin of new requests.
+    """
+    user = update.effective_user
+    chat_id = user.id
+
+    if _is_admin(chat_id):
+        return True
+
+    status = get_status(chat_id)
+
+    if status == "approved":
+        return True
+
+    if status == "pending":
+        await update.effective_message.reply_text(
+            "⏳ Tu solicitud de acceso está pendiente de aprobación."
+        )
+        return False
+
+    if status == "rejected":
+        await update.effective_message.reply_text(
+            "❌ Tu solicitud de acceso fue rechazada."
+        )
+        return False
+
+    # New user — register and notify admin
+    name = user.full_name or "Desconocido"
+    register_user(chat_id, name, user.username)
+
+    await update.effective_message.reply_text(
+        "👋 Hola! Para usar BookFinder necesitas aprobación del administrador.\n\n"
+        "Tu solicitud ha sido enviada. Te avisaré cuando sea aprobada."
+    )
+
+    if TELEGRAM_ADMIN_ID:
+        username_str = f"@{user.username}" if user.username else "sin username"
+        await context.bot.send_message(
+            chat_id=TELEGRAM_ADMIN_ID,
+            text=f"🔔 *Nueva solicitud de acceso*\n\n"
+                 f"👤 *{_safe(name)}* ({username_str})\n"
+                 f"🆔 `{chat_id}`",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Aprobar", callback_data=f"approve:{chat_id}"),
+                InlineKeyboardButton("❌ Rechazar", callback_data=f"reject:{chat_id}"),
+            ]]),
+            parse_mode="Markdown",
+        )
+
+    return False
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -130,6 +194,54 @@ async def handle_setfmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await callback.edit_message_text(f"✅ Formato por defecto guardado: *{fmt.upper()}*", parse_mode="Markdown")
 
 
+# ── Approve / Reject ──────────────────────────────────────────────────────────
+
+async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    callback = update.callback_query
+    await callback.answer()
+
+    if not _is_admin(update.effective_chat.id):
+        return
+
+    user_chat_id = int(callback.data.split(":")[1])
+    set_status(user_chat_id, "approved")
+
+    user_info = get(user_chat_id)
+    name = _safe(user_info.get("name", "Usuario"))
+
+    await callback.edit_message_text(f"✅ *{name}* aprobado.", parse_mode="Markdown")
+    try:
+        await context.bot.send_message(
+            chat_id=user_chat_id,
+            text="✅ Tu solicitud ha sido aprobada. Ya puedes usar BookFinder.\n\nEscribe el título de un libro para empezar.",
+        )
+    except Exception:
+        pass
+
+
+async def handle_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    callback = update.callback_query
+    await callback.answer()
+
+    if not _is_admin(update.effective_chat.id):
+        return
+
+    user_chat_id = int(callback.data.split(":")[1])
+    set_status(user_chat_id, "rejected")
+
+    user_info = get(user_chat_id)
+    name = _safe(user_info.get("name", "Usuario"))
+
+    await callback.edit_message_text(f"❌ *{name}* rechazado.", parse_mode="Markdown")
+    try:
+        await context.bot.send_message(
+            chat_id=user_chat_id,
+            text="❌ Tu solicitud de acceso ha sido rechazada.",
+        )
+    except Exception:
+        pass
+
+
 # ── Search ────────────────────────────────────────────────────────────────────
 
 def _list_keyboard(books: list[dict]) -> InlineKeyboardMarkup:
@@ -146,6 +258,9 @@ def _list_keyboard(books: list[dict]) -> InlineKeyboardMarkup:
 
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        return
+
     query = update.message.text.strip()
     chat_id = update.effective_chat.id
 
@@ -239,6 +354,10 @@ def _detail_keyboard(idx: int) -> InlineKeyboardMarkup:
 
 
 async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        await update.callback_query.answer()
+        return
+
     callback = update.callback_query
     await callback.answer()
 
@@ -496,6 +615,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_setfmt,       pattern=r"^setfmt:\w+$"))
     app.add_handler(CallbackQueryHandler(handle_cancel_fmt,   pattern=r"^cancel_fmt$"))
     app.add_handler(CallbackQueryHandler(handle_back,         pattern=r"^back$"))
+    app.add_handler(CallbackQueryHandler(handle_approve,      pattern=r"^approve:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_reject,       pattern=r"^reject:\d+$"))
 
     logger.info("BookFinder bot started.")
     app.run_polling(drop_pending_updates=True)
