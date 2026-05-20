@@ -29,6 +29,13 @@ LIBGEN_MIRROR = os.environ.get("LIBGEN_MIRROR", "li")
 # ── Telegram bot ─────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
+# ── SMTP (e.g. Gmail App Password) ───────────────────────────────────────────
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")   # your Gmail address
+SMTP_PASS = os.environ.get("SMTP_PASS", "")   # Gmail App Password (16 chars)
+SMTP_FROM = os.environ.get("SMTP_FROM", "")   # display name <email> or just email
+
 # ── Defaults ─────────────────────────────────────────────────────────────────
 DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "")       # empty = any language
 MAX_RESULTS  = int(os.environ.get("MAX_RESULTS", "15"))  # max results to show

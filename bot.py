@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-BookFinder — Telegram Bot (Phase 2 + 3)
+BookFinder — Telegram Bot
+
+Commands:
+  /start         — welcome
+  /setkindle     — set your Kindle email  (e.g. /setkindle xxxx@kindle.com)
+  /setformat     — set your default download/send format
 
 Flow:
-  Text message  → search Z-Library + Libgen → list with buttons
-  Tap result    → new message: cover + full details + [Descargar] [Enviar] [Volver]
-  [Descargar]   → new message: format selection → download + Calibre convert → send file
-  [Enviar]      → placeholder (Phase 3)
-  [Volver]      → deletes detail message (list stays visible)
+  Text message → search → list → detail view
+  [Descargar]  → format selection → download + convert → Telegram file
+  [Enviar]     → format selection → download + convert → email to Kindle
+  [Volver]     → back to list
 """
 
 import asyncio
@@ -28,8 +32,15 @@ from telegram.ext import (
 from config import TELEGRAM_TOKEN, BOT_MAX_RESULTS
 from converter import SUPPORTED_FORMATS, convert
 from downloader import download_book
+from mailer import send_to_kindle
 from searcher_libgen import search_libgen
 from searcher_zlib import get_book_details, search_zlibrary
+from user_settings import (
+    get_default_format,
+    get_kindle_email,
+    set_default_format,
+    set_kindle_email,
+)
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -38,24 +49,80 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _cache: dict[int, list[dict]] = {}
-
 TELEGRAM_MAX_FILE_MB = 50
 
 
 def _safe(text) -> str:
-    """Strip Markdown-breaking characters from user-supplied text."""
     return re.sub(r"[*_`\[\]]", "", str(text or "")).strip()
 
 
-# ── /start ────────────────────────────────────────────────────────────────────
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📚 *BookFinder*\n\n"
-        "Escríbeme el título de un libro y te busco resultados en Z-Library y Libgen.\n\n"
-        "Toca un resultado para ver la ficha completa y descargarlo.",
+        "Escríbeme el título de un libro para buscarlo.\n\n"
+        "*Comandos:*\n"
+        "/setkindle `email@kindle.com` — guarda tu email de Kindle\n"
+        "/setformat — elige tu formato por defecto",
         parse_mode="Markdown",
     )
+
+
+async def cmd_setkindle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    args = context.args
+
+    if not args:
+        current = get_kindle_email(chat_id)
+        msg = f"📧 Tu Kindle email actual: `{current}`" if current else "📧 No tienes Kindle email configurado."
+        await update.message.reply_text(
+            msg + "\n\nUso: `/setkindle tu@kindle.com`",
+            parse_mode="Markdown",
+        )
+        return
+
+    email = args[0].strip()
+    if "@" not in email:
+        await update.message.reply_text("❌ Email inválido. Ejemplo: `/setkindle xxxx@kindle.com`", parse_mode="Markdown")
+        return
+
+    set_kindle_email(chat_id, email)
+    await update.message.reply_text(
+        f"✅ Kindle email guardado: `{email}`\n\n"
+        f"Recuerda añadir `{email.split('@')[0] if 'SMTP_FROM' not in email else ''}` "
+        f"a tu lista de emails aprobados en Amazon:\n"
+        f"Amazon → Manage Your Content → Preferences → Approved Personal Document E-mail List",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_setformat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    current = get_default_format(chat_id)
+
+    buttons = []
+    row = []
+    for fmt in SUPPORTED_FORMATS:
+        label = f"✓ {fmt.upper()}" if fmt == (current or "") else fmt.upper()
+        row.append(InlineKeyboardButton(label, callback_data=f"setfmt:{fmt}"))
+    buttons.append(row)
+
+    msg = f"📁 Formato actual: *{current.upper()}*\n\nElige tu formato por defecto:" if current else "📁 Elige tu formato por defecto:"
+    await update.message.reply_text(
+        msg,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_setfmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    callback = update.callback_query
+    await callback.answer()
+    chat_id = update.effective_chat.id
+    fmt = callback.data.split(":")[1]
+    set_default_format(chat_id, fmt)
+    await callback.edit_message_text(f"✅ Formato por defecto guardado: *{fmt.upper()}*", parse_mode="Markdown")
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
@@ -87,9 +154,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if len(results) < BOT_MAX_RESULTS:
         try:
-            results.extend(
-                search_libgen(query, max_results=BOT_MAX_RESULTS - len(results))
-            )
+            results.extend(search_libgen(query, max_results=BOT_MAX_RESULTS - len(results)))
         except Exception as e:
             logger.warning("Libgen error: %s", e)
 
@@ -98,7 +163,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     _cache[chat_id] = results[:BOT_MAX_RESULTS]
-
     await msg.edit_text(
         f"📚 *{_safe(query)}* — elige un resultado:",
         reply_markup=_list_keyboard(_cache[chat_id]),
@@ -110,7 +174,6 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def _format_detail(book: dict, info: dict | None) -> str:
     b = (info or {}).get("book", {})
-
     lines = [f"📖 *{_safe(book['title'])}*"]
 
     author = _safe(b.get("author") or book.get("author", ""))
@@ -137,10 +200,10 @@ def _format_detail(book: dict, info: dict | None) -> str:
     row("📂", "Categorías",  "categories")
     row("📄", "Tipo",         "contentType", "content_type")
     row("📑", "Volumen",      "volume")
-    row("📅", "Año",          "year",         fallback=book.get("year"))
-    row("🌍", "Idioma",       "language",     fallback=book.get("language"))
+    row("📅", "Año",          "year",        fallback=book.get("year"))
+    row("🌍", "Idioma",       "language",    fallback=book.get("language"))
     row("📚", "Serie",        "series")
-    row("🏢", "Editorial",    "publisher",    fallback=book.get("publisher"))
+    row("🏢", "Editorial",    "publisher",   fallback=book.get("publisher"))
 
     ext  = _safe(b.get("extension") or book.get("extension", "")).upper()
     size = _safe(b.get("filesizeString") or b.get("filesize_string") or book.get("size", ""))
@@ -183,7 +246,6 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     book = books[idx]
-
     info = None
     if book["source"] == "zlibrary":
         loop = asyncio.get_event_loop()
@@ -200,37 +262,49 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
     send_kwargs = dict(chat_id=chat_id, reply_markup=keyboard, parse_mode="Markdown")
-
     if cover_url:
         try:
             await context.bot.send_photo(photo=cover_url, caption=text, **send_kwargs)
             return
         except Exception as e:
             logger.warning("Cover photo failed: %s", e)
-
     await context.bot.send_message(text=text, **send_kwargs)
 
 
-# ── Format selection ──────────────────────────────────────────────────────────
+# ── Format selection (shared for download and send) ───────────────────────────
 
-def _format_keyboard(idx: int, original_fmt: str) -> InlineKeyboardMarkup:
-    fmt_buttons = []
+def _format_keyboard(idx: int, action: str, original_fmt: str, default_fmt: str | None) -> InlineKeyboardMarkup:
+    """
+    action: 'dl' for download, 'snd' for send.
+    Marks default format with ✓, original book format with (original).
+    """
+    buttons = []
     for fmt in SUPPORTED_FORMATS:
-        label = f"✓ {fmt.upper()}" if fmt == original_fmt.lower() else fmt.upper()
-        fmt_buttons.append(InlineKeyboardButton(label, callback_data=f"fmt:{idx}:{fmt}"))
+        parts = []
+        if fmt == (default_fmt or "").lower():
+            parts.append("✓")
+        label = f"{' '.join(parts)} {fmt.upper()}".strip()
+        if fmt == original_fmt.lower() and fmt != (default_fmt or "").lower():
+            label += " (original)"
+        buttons.append(InlineKeyboardButton(label, callback_data=f"fmt:{action}:{idx}:{fmt}"))
+
     return InlineKeyboardMarkup([
-        fmt_buttons,
-        [InlineKeyboardButton("❌ Cancelar", callback_data="cancel_dl")],
+        buttons,
+        [InlineKeyboardButton("❌ Cancelar", callback_data="cancel_fmt")],
     ])
 
 
-async def handle_download_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show format selection when [Descargar] is tapped."""
+async def _show_format_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    idx: int,
+    action: str,          # 'dl' or 'snd'
+    action_label: str,    # 'Descargar' or 'Enviar al Kindle'
+) -> None:
     callback = update.callback_query
     await callback.answer()
 
     chat_id = update.effective_chat.id
-    idx = int(callback.data.split(":")[1])
     books = _cache.get(chat_id, [])
 
     if idx >= len(books):
@@ -239,23 +313,75 @@ async def handle_download_menu(update: Update, context: ContextTypes.DEFAULT_TYP
 
     book = books[idx]
     original_fmt = (book.get("extension") or "epub").lower()
+    default_fmt = get_default_format(chat_id)
 
+    hint = f"✓ = formato por defecto   (original) = formato del archivo"
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"📥 *{_safe(book['title'])}*\n\nElige el formato de descarga:\n_(✓ = formato original, sin conversión)_",
-        reply_markup=_format_keyboard(idx, original_fmt),
+        text=f"*{action_label}* — elige formato:\n_{hint}_",
+        reply_markup=_format_keyboard(idx, action, original_fmt, default_fmt),
         parse_mode="Markdown",
     )
 
 
-# ── Download + convert ────────────────────────────────────────────────────────
+async def handle_download_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    idx = int(update.callback_query.data.split(":")[1])
+    await _show_format_menu(update, context, idx, "dl", "Descargar")
 
-async def handle_fmt_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    idx = int(update.callback_query.data.split(":")[1])
+    chat_id = update.effective_chat.id
+
+    if not get_kindle_email(chat_id):
+        await update.callback_query.answer(
+            "No tienes Kindle email configurado.\nUsa /setkindle tu@kindle.com",
+            show_alert=True,
+        )
+        return
+
+    await _show_format_menu(update, context, idx, "snd", "Enviar al Kindle")
+
+
+# ── Shared download + convert helper ─────────────────────────────────────────
+
+async def _download_and_convert(
+    callback,
+    context: ContextTypes.DEFAULT_TYPE,
+    book: dict,
+    fmt: str,
+) -> Path | None:
+    """Download book and convert to fmt. Updates callback message with progress."""
+    title = _safe(book["title"])
+    loop = asyncio.get_event_loop()
+
+    await callback.edit_message_text(f"⏳ Descargando *{title}*…", parse_mode="Markdown")
+    path: Path | None = await loop.run_in_executor(None, download_book, book)
+
+    if path is None:
+        await callback.edit_message_text(f"❌ No se pudo descargar *{title}*.", parse_mode="Markdown")
+        return None
+
+    if path.suffix.lstrip(".").lower() != fmt:
+        await callback.edit_message_text(f"⚙️ Convirtiendo a *{fmt.upper()}*…", parse_mode="Markdown")
+        converted = await loop.run_in_executor(None, convert, path, fmt)
+        if converted is None:
+            path.unlink(missing_ok=True)
+            await callback.edit_message_text(f"❌ Error al convertir a {fmt.upper()}.", parse_mode="Markdown")
+            return None
+        path = converted
+
+    return path
+
+
+# ── Handle format selection ───────────────────────────────────────────────────
+
+async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     callback = update.callback_query
     await callback.answer()
 
-    parts = callback.data.split(":")
-    idx, fmt = int(parts[1]), parts[2]
+    _, action, idx_str, fmt = callback.data.split(":")
+    idx = int(idx_str)
     chat_id = update.effective_chat.id
     books = _cache.get(chat_id, [])
 
@@ -266,80 +392,68 @@ async def handle_fmt_download(update: Update, context: ContextTypes.DEFAULT_TYPE
     book = books[idx]
     title = _safe(book["title"])
 
-    await callback.edit_message_text(f"⏳ Descargando *{title}*…", parse_mode="Markdown")
-
-    loop = asyncio.get_event_loop()
-    path: Path | None = await loop.run_in_executor(None, download_book, book)
-
+    path = await _download_and_convert(callback, context, book, fmt)
     if path is None:
-        await callback.edit_message_text(
-            f"❌ No se pudo descargar *{title}*.", parse_mode="Markdown"
-        )
         return
 
-    # Convert if format differs
-    original_fmt = path.suffix.lstrip(".").lower()
-    if original_fmt != fmt:
-        await callback.edit_message_text(
-            f"⚙️ Convirtiendo a *{fmt.upper()}*…", parse_mode="Markdown"
-        )
-        converted = await loop.run_in_executor(None, convert, path, fmt)
-        if converted is None:
+    if action == "dl":
+        # ── Send file to Telegram ──
+        size_mb = path.stat().st_size / (1024 * 1024)
+        if size_mb > TELEGRAM_MAX_FILE_MB:
             path.unlink(missing_ok=True)
-            await callback.edit_message_text(
-                f"❌ Error al convertir a {fmt.upper()}.", parse_mode="Markdown"
-            )
+            await callback.edit_message_text(f"⚠️ El archivo pesa {size_mb:.1f} MB (límite Telegram: 50 MB).")
             return
-        path = converted
 
-    size_mb = path.stat().st_size / (1024 * 1024)
-    if size_mb > TELEGRAM_MAX_FILE_MB:
+        await callback.edit_message_text(f"📤 Enviando *{title}*…", parse_mode="Markdown")
+        try:
+            caption = f"📖 *{title}*"
+            if book.get("author"):
+                caption += f"\n✍️ {_safe(book['author'])}"
+            caption += f"\n📁 {fmt.upper()}"
+            with open(path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=chat_id, document=f, filename=path.name,
+                    caption=caption, parse_mode="Markdown",
+                )
+            await callback.edit_message_text(f"✅ *{title}* enviado en {fmt.upper()}.", parse_mode="Markdown")
+        except Exception as e:
+            logger.error("Send to Telegram error: %s", e)
+            await callback.edit_message_text("❌ Error al enviar el archivo.")
+        finally:
+            path.unlink(missing_ok=True)
+
+    elif action == "snd":
+        # ── Send file by email to Kindle ──
+        kindle_email = get_kindle_email(chat_id)
+        if not kindle_email:
+            path.unlink(missing_ok=True)
+            await callback.edit_message_text("❌ No tienes Kindle email configurado. Usa /setkindle.")
+            return
+
+        await callback.edit_message_text(f"📨 Enviando al Kindle `{kindle_email}`…", parse_mode="Markdown")
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(None, send_to_kindle, kindle_email, path, title)
         path.unlink(missing_ok=True)
-        await callback.edit_message_text(
-            f"⚠️ El archivo pesa {size_mb:.1f} MB (límite Telegram: 50 MB)."
-        )
-        return
 
-    await callback.edit_message_text(f"📤 Enviando *{title}*…", parse_mode="Markdown")
-
-    try:
-        caption = f"📖 *{title}*"
-        if book.get("author"):
-            caption += f"\n✍️ {_safe(book['author'])}"
-        caption += f"\n📁 {fmt.upper()}"
-
-        with open(path, "rb") as f:
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=f,
-                filename=path.name,
-                caption=caption,
+        if ok:
+            await callback.edit_message_text(
+                f"✅ *{title}* enviado a `{kindle_email}` en {fmt.upper()}.\n\n"
+                f"Aparecerá en tu Kindle en unos minutos.",
                 parse_mode="Markdown",
             )
-        await callback.edit_message_text(
-            f"✅ *{title}* enviado en {fmt.upper()}.", parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error("Send error: %s", e)
-        await callback.edit_message_text("❌ Error al enviar el archivo.")
-    finally:
-        path.unlink(missing_ok=True)
+        else:
+            await callback.edit_message_text(
+                "❌ Error al enviar el email. Comprueba la configuración SMTP en el servidor."
+            )
 
 
-async def handle_cancel_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_cancel_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     callback = update.callback_query
     await callback.answer()
     try:
         await callback.message.delete()
     except Exception:
         pass
-
-
-# ── Send (Phase 3 placeholder) ────────────────────────────────────────────────
-
-async def handle_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    callback = update.callback_query
-    await callback.answer("📨 Envío a Kindle — próximamente.", show_alert=True)
 
 
 # ── Back ──────────────────────────────────────────────────────────────────────
@@ -360,14 +474,20 @@ def main() -> None:
         raise RuntimeError("TELEGRAM_TOKEN is not set in .env")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
+
+    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("setkindle", cmd_setkindle))
+    app.add_handler(CommandHandler("setformat", cmd_setformat))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
-    app.add_handler(CallbackQueryHandler(handle_detail,          pattern=r"^d:\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_download_menu,   pattern=r"^dl:\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_fmt_download,    pattern=r"^fmt:\d+:\w+$"))
-    app.add_handler(CallbackQueryHandler(handle_cancel_download, pattern=r"^cancel_dl$"))
-    app.add_handler(CallbackQueryHandler(handle_send,            pattern=r"^send:\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_back,            pattern=r"^back$"))
+
+    app.add_handler(CallbackQueryHandler(handle_detail,       pattern=r"^d:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_download_menu, pattern=r"^dl:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_send_menu,    pattern=r"^send:\d+$"))
+    app.add_handler(CallbackQueryHandler(handle_fmt,          pattern=r"^fmt:(dl|snd):\d+:\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_setfmt,       pattern=r"^setfmt:\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_cancel_fmt,   pattern=r"^cancel_fmt$"))
+    app.add_handler(CallbackQueryHandler(handle_back,         pattern=r"^back$"))
 
     logger.info("BookFinder bot started.")
     app.run_polling(drop_pending_updates=True)
