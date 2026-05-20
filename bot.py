@@ -123,6 +123,9 @@ async def _check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        return
+
     await update.message.reply_text(
         "📚 *BookFinder*\n\n"
         "Escríbeme el título de un libro para buscarlo.\n\n"
