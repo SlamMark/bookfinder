@@ -91,6 +91,20 @@ def search_zlibrary(
     return [_book_to_dict(b) for b in books[:max_results]]
 
 
+def get_book_details(book_dict: dict) -> dict | None:
+    """Fetch full book info from Z-Library (description, series, IPFS, etc.)."""
+    client = _get_client()
+    if client is None:
+        return None
+    item = book_dict.get("_zlib_item")
+    if item is None:
+        return None
+    try:
+        return client.getBookInfo(item["id"], item["hash"])
+    except Exception:
+        return None
+
+
 def resolve_download_url(book_dict: dict) -> str | None:
     """Resolve the direct download URL for a Z-Library book."""
     client = _get_client()
