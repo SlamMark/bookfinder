@@ -101,30 +101,30 @@ def main():
     all_results: list[dict] = []
     lang = args.lang or None
 
-    # ── Step 1: Search Libgen ────────────────────────────────────────────
-    if not args.zlib_only:
-        print(f"  🔍 Searching Libgen for {BOLD}'{args.query}'{RESET}" +
+    # ── Step 1: Search Z-Library ─────────────────────────────────────────
+    if not args.libgen_only:
+        print(f"  🔍 Searching Z-Library for {BOLD}'{args.query}'{RESET}" +
               (f" [{lang}]" if lang else "") + " …")
         try:
-            libgen_results = search_libgen(args.query, lang=lang, max_results=args.max)
-            print(f"     → Found {GREEN}{len(libgen_results)}{RESET} results on Libgen")
-            all_results.extend(libgen_results)
+            zlib_results = search_zlibrary(args.query, lang=lang, max_results=args.max)
+            print(f"     → Found {YELLOW}{len(zlib_results)}{RESET} results on Z-Library")
+            all_results.extend(zlib_results)
         except Exception as e:
-            print(f"     → {RED}Libgen error: {e}{RESET}")
+            print(f"     → {RED}Z-Library error: {e}{RESET}")
 
-    # ── Step 2: Search Z-Library (if needed / requested) ─────────────────
-    if not args.libgen_only:
-        need_zlib = args.zlib_only or len(all_results) < args.max
-        if need_zlib:
+    # ── Step 2: Search Libgen (if needed / requested) ────────────────────
+    if not args.zlib_only:
+        need_libgen = args.libgen_only or len(all_results) < args.max
+        if need_libgen:
             remaining = args.max - len(all_results)
-            print(f"  🔍 Searching Z-Library for {BOLD}'{args.query}'{RESET}" +
+            print(f"  🔍 Searching Libgen for {BOLD}'{args.query}'{RESET}" +
                   (f" [{lang}]" if lang else "") + " …")
             try:
-                zlib_results = search_zlibrary(args.query, lang=lang, max_results=remaining)
-                print(f"     → Found {YELLOW}{len(zlib_results)}{RESET} results on Z-Library")
-                all_results.extend(zlib_results)
+                libgen_results = search_libgen(args.query, lang=lang, max_results=remaining)
+                print(f"     → Found {GREEN}{len(libgen_results)}{RESET} results on Libgen")
+                all_results.extend(libgen_results)
             except Exception as e:
-                print(f"     → {RED}Z-Library error: {e}{RESET}")
+                print(f"     → {RED}Libgen error: {e}{RESET}")
 
     # ── Step 3: Display results ──────────────────────────────────────────
     print()
