@@ -535,17 +535,20 @@ async def _download_and_convert(
     context: ContextTypes.DEFAULT_TYPE,
     book: dict,
     fmt: str,
-) -> Path | None:
-    """Download book and convert to fmt. Updates callback message with progress."""
+) -> tuple[Path | None, str | None]:
+    """
+    Download book and convert to fmt. Updates callback message with progress.
+    Returns (path, warning) — warning is set if downloaded file metadata mismatches.
+    """
     title = _safe(book["title"])
     loop = asyncio.get_event_loop()
 
     await callback.edit_message_text(f"⏳ Descargando *{title}*…", parse_mode="Markdown")
-    path: Path | None = await loop.run_in_executor(None, download_book, book)
+    path, warning = await loop.run_in_executor(None, download_book, book)
 
     if path is None:
         await callback.edit_message_text(f"❌ No se pudo descargar *{title}*.", parse_mode="Markdown")
-        return None
+        return None, None
 
     if path.suffix.lstrip(".").lower() != fmt:
         await callback.edit_message_text(f"⚙️ Convirtiendo a *{fmt.upper()}*…", parse_mode="Markdown")
@@ -553,10 +556,10 @@ async def _download_and_convert(
         if converted is None:
             path.unlink(missing_ok=True)
             await callback.edit_message_text(f"❌ Error al convertir a {fmt.upper()}.", parse_mode="Markdown")
-            return None
+            return None, None
         path = converted
 
-    return path
+    return path, warning
 
 
 # ── Handle format selection ───────────────────────────────────────────────────
@@ -581,7 +584,7 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     book = books[idx]
     title = _safe(book["title"])
 
-    path = await _download_and_convert(callback, context, book, fmt)
+    path, dl_warning = await _download_and_convert(callback, context, book, fmt)
     if path is None:
         return
 
@@ -599,6 +602,8 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             if book.get("author"):
                 caption += f"\n✍️ {_safe(book['author'])}"
             caption += f"\n📁 {fmt.upper()}"
+            if dl_warning:
+                caption += f"\n\n{dl_warning}"
             with open(path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=chat_id, document=f, filename=path.name,
@@ -617,6 +622,14 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if not kindle_email:
             path.unlink(missing_ok=True)
             await callback.edit_message_text("❌ No tienes Kindle email configurado. Usa /setkindle.")
+            return
+
+        if dl_warning:
+            path.unlink(missing_ok=True)
+            await callback.edit_message_text(
+                f"{dl_warning}\n\nNo se ha enviado al Kindle. Prueba con otro resultado de la búsqueda.",
+                parse_mode="Markdown",
+            )
             return
 
         await callback.edit_message_text(f"📨 Enviando al Kindle `{kindle_email}`…", parse_mode="Markdown")
