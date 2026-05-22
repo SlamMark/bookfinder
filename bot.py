@@ -19,7 +19,7 @@ import logging
 import re
 from pathlib import Path
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -124,20 +124,32 @@ async def _check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
+_HELP_TEXT = (
+    "📚 *BookFinder*\n\n"
+    "Escríbeme el título de un libro para buscarlo\\.\n\n"
+    "*Búsqueda*\n"
+    "/setsource — fuente de búsqueda \\(Z\\-Library, Libgen o ambas\\)\n\n"
+    "*Descarga*\n"
+    "/setformat — formato por defecto \\(EPUB, PDF…\\)\n\n"
+    "*Kindle*\n"
+    "/setkindle `email@kindle\\.com` — guarda tu email de Kindle\n"
+    "/testkindle — envía un archivo de prueba a tu Kindle\n\n"
+    "*Info*\n"
+    "/myid — muestra tu ID de Telegram\n"
+    "/help — muestra este mensaje"
+)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _check_access(update, context):
         return
+    await update.message.reply_text(_HELP_TEXT, parse_mode="MarkdownV2")
 
-    await update.message.reply_text(
-        "📚 *BookFinder*\n\n"
-        "Escríbeme el título de un libro para buscarlo.\n\n"
-        "*Comandos:*\n"
-        "/setkindle `email@kindle.com` — guarda tu email de Kindle\n"
-        "/setformat — elige tu formato por defecto\n"
-        "/setsource — elige dónde buscar (Z-Library, Libgen o ambas)\n"
-        "/testkindle — envía un archivo de prueba a tu Kindle",
-        parse_mode="Markdown",
-    )
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        return
+    await update.message.reply_text(_HELP_TEXT, parse_mode="MarkdownV2")
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -815,9 +827,20 @@ def main() -> None:
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN is not set in .env")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    async def post_init(application: Application) -> None:
+        await application.bot.set_my_commands([
+            BotCommand("help",       "Muestra todos los comandos disponibles"),
+            BotCommand("setkindle",  "Guarda tu email de Kindle"),
+            BotCommand("setformat",  "Elige el formato por defecto"),
+            BotCommand("setsource",  "Elige la fuente de búsqueda"),
+            BotCommand("testkindle", "Envía un archivo de prueba a tu Kindle"),
+            BotCommand("myid",       "Muestra tu ID de Telegram"),
+        ])
+
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("help",        cmd_help))
     app.add_handler(CommandHandler("myid",        cmd_myid))
     app.add_handler(CommandHandler("setkindle",   cmd_setkindle))
     app.add_handler(CommandHandler("setformat",   cmd_setformat))
@@ -829,7 +852,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_detail,        pattern=r"^d:\d+$"))
     app.add_handler(CallbackQueryHandler(handle_download_menu, pattern=r"^dl:\d+$"))
     app.add_handler(CallbackQueryHandler(handle_send_menu,     pattern=r"^send:\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_fmt,           pattern=r"^fmt:(dl|snd):\d+:\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_fmt,           pattern=r"^fmt:(dl|snd):\w+:\w+$"))
     app.add_handler(CallbackQueryHandler(handle_setfmt,        pattern=r"^setfmt:\w+$"))
     app.add_handler(CallbackQueryHandler(handle_setsrc,        pattern=r"^setsrc:\w+$"))
     app.add_handler(CallbackQueryHandler(handle_cancel_fmt,    pattern=r"^cancel_fmt$"))
