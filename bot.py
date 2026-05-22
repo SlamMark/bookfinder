@@ -495,7 +495,7 @@ async def _show_format_menu(
     hint = f"✓ = formato por defecto   (original) = formato del archivo"
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"*{action_label}* — elige formato:\n_{hint}_",
+        text=f"*{action_label}*\n📖 _{_safe(book['title'])}_\n\n_{hint}_",
         reply_markup=_format_keyboard(idx, action, original_fmt, default_fmt),
         parse_mode="Markdown",
     )
