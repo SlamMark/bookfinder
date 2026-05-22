@@ -30,8 +30,8 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, BOT_MAX_RESULTS, SMTP_FROM, SMTP_USER
-from converter import KINDLE_EMAIL_FORMATS, SUPPORTED_FORMATS, convert
-from downloader import download_book
+from converter import KINDLE_EMAIL_FORMATS, SUPPORTED_FORMATS, convert, set_epub_metadata
+from downloader import check_epub_cover, download_book
 from mailer import send_to_kindle
 from searcher_libgen import search_libgen
 from searcher_zlib import get_book_details, search_zlibrary
@@ -695,14 +695,35 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
+        # For EPUB: set correct metadata, then verify cover is present
+        if fmt == "epub":
+            loop = asyncio.get_event_loop()
+            author = book.get("author", "")
+            await loop.run_in_executor(None, set_epub_metadata, path, title, author)
+
+            has_cover = await loop.run_in_executor(None, check_epub_cover, path)
+            if not has_cover:
+                path.unlink(missing_ok=True)
+                await callback.edit_message_text(
+                    f"⚠️ *El EPUB no contiene portada.*\n\n"
+                    f"No se ha enviado al Kindle para evitar que llegue sin imagen de portada.\n\n"
+                    f"Opciones:\n"
+                    f"• Prueba con otro resultado de la búsqueda\n"
+                    f"• Descarga el archivo y añade la portada manualmente con Calibre\n"
+                    f"• Envía en formato AZW3 o PDF (pueden conservar la portada)",
+                    parse_mode="Markdown",
+                )
+                return
+
         await callback.edit_message_text(f"📨 Enviando al Kindle `{kindle_email}`…", parse_mode="Markdown")
         loop = asyncio.get_event_loop()
         smtp_error, send_info = await loop.run_in_executor(None, send_to_kindle, kindle_email, path, title)
         path.unlink(missing_ok=True)
 
         if smtp_error is None:
+            attempts_note = f" ({send_info['send_attempts']} intento{'s' if send_info['send_attempts'] > 1 else ''})" if send_info['send_attempts'] > 1 else ""
             await callback.edit_message_text(
-                f"✅ *{title}* enviado a `{kindle_email}` en {fmt.upper()}.\n\n"
+                f"✅ *{title}* enviado a `{kindle_email}` en {fmt.upper()}{attempts_note}.\n\n"
                 f"📁 Archivo: `{send_info['filename']}` ({send_info['size_mb']} MB)\n"
                 f"📤 Remitente: `{send_info['sender']}`\n\n"
                 f"⚠️ Si no llega en 10 min, verifica que `{send_info['sender']}` esté en la lista de "
@@ -712,7 +733,7 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
         else:
             await callback.edit_message_text(
-                f"❌ Error al enviar al Kindle:\n{smtp_error}\n\n"
+                f"❌ Error al enviar al Kindle ({send_info['send_attempts']} intentos):\n{smtp_error}\n\n"
                 f"📁 Archivo: `{send_info['filename']}` ({send_info['size_mb']} MB)\n"
                 f"📤 Remitente: `{send_info['sender']}`\n\n"
                 f"Prueba `/testkindle` para diagnosticar el problema.",

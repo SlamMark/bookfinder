@@ -17,6 +17,30 @@ SUPPORTED_FORMATS = ["epub", "mobi", "azw3", "pdf"]
 KINDLE_EMAIL_FORMATS = ["epub", "mobi", "azw3", "pdf"]
 
 
+def set_epub_metadata(path: Path, title: str, author: str) -> bool:
+    """
+    Set title and author in an EPUB file using Calibre's ebook-meta CLI.
+    Returns True on success. Non-fatal — caller proceeds even on failure.
+    """
+    try:
+        result = subprocess.run(
+            ["ebook-meta", str(path), f"--title={title}", f"--authors={author}"],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info("Metadata set: title=%r author=%r in %s", title, author, path.name)
+            return True
+        logger.warning("ebook-meta failed: %s", result.stderr.decode(errors="replace"))
+        return False
+    except FileNotFoundError:
+        logger.warning("ebook-meta not found — skipping metadata update")
+        return False
+    except Exception as e:
+        logger.warning("set_epub_metadata error: %s", e)
+        return False
+
+
 def convert(src: Path, target_format: str) -> Path | None:
     """
     Convert src to target_format using Calibre.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
 import requests
@@ -21,10 +22,12 @@ from searcher_zlib import resolve_download_url as zlib_resolve
 
 
 def _sanitise_filename(name: str) -> str:
-    """Remove or replace characters that are problematic in file names."""
-    name = re.sub(r'[<>:"/\\|?*]', '_', name)
+    """Normalize unicode to ASCII, strip problematic chars, cap length."""
+    name = unicodedata.normalize("NFKD", name)
+    name = name.encode("ascii", errors="ignore").decode("ascii")
+    name = re.sub(r'[<>:"/\\|?*]', '', name)
     name = re.sub(r'\s+', ' ', name).strip()
-    return name[:200]  # cap length
+    return name[:120]
 
 
 def resolve_url(book: dict) -> str | None:
@@ -36,36 +39,104 @@ def resolve_url(book: dict) -> str | None:
     return None
 
 
-def _read_epub_metadata(path: Path) -> dict:
+def _parse_opf(path: Path) -> tuple[ET.Element | None, str, list[str]]:
     """
-    Extract title and author from an EPUB's OPF metadata.
-    Returns dict with 'title' and 'author' keys (empty strings if unreadable).
+    Open EPUB and return (opf_root, opf_dir, zip_namelist).
+    Returns (None, "", []) on failure.
     """
     try:
         with zipfile.ZipFile(path, "r") as zf:
-            # Find OPF file via container.xml
             container = zf.read("META-INF/container.xml").decode("utf-8", errors="replace")
             root = ET.fromstring(container)
             ns = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
-            opf_path = root.find(".//c:rootfile", ns)
-            if opf_path is None:
-                return {"title": "", "author": ""}
-            opf_name = opf_path.get("full-path", "")
-
-            opf_data = zf.read(opf_name).decode("utf-8", errors="replace")
+            rootfile_el = root.find(".//c:rootfile", ns)
+            if rootfile_el is None:
+                return None, "", []
+            opf_path = rootfile_el.get("full-path", "")
+            opf_dir = str(Path(opf_path).parent).replace("\\", "/")
+            if opf_dir == ".":
+                opf_dir = ""
+            opf_data = zf.read(opf_path).decode("utf-8", errors="replace")
             opf_root = ET.fromstring(opf_data)
-
-            dc_ns = "http://purl.org/dc/elements/1.1/"
-            title_el = opf_root.find(f".//{{{dc_ns}}}title")
-            author_el = opf_root.find(f".//{{{dc_ns}}}creator")
-
-            return {
-                "title": (title_el.text or "").strip() if title_el is not None else "",
-                "author": (author_el.text or "").strip() if author_el is not None else "",
-            }
+            namelist = zf.namelist()
+            return opf_root, opf_dir, namelist
     except Exception as e:
-        logger.debug("Could not read EPUB metadata: %s", e)
+        logger.debug("Could not parse EPUB OPF: %s", e)
+        return None, "", []
+
+
+def _read_epub_metadata(path: Path) -> dict:
+    """Extract title and author from an EPUB's OPF metadata."""
+    opf_root, _, _ = _parse_opf(path)
+    if opf_root is None:
         return {"title": "", "author": ""}
+    dc_ns = "http://purl.org/dc/elements/1.1/"
+    title_el = opf_root.find(f".//{{{dc_ns}}}title")
+    author_el = opf_root.find(f".//{{{dc_ns}}}creator")
+    return {
+        "title": (title_el.text or "").strip() if title_el is not None else "",
+        "author": (author_el.text or "").strip() if author_el is not None else "",
+    }
+
+
+def check_epub_cover(path: Path) -> bool:
+    """
+    Returns True if the EPUB contains a cover image referenced in the manifest.
+    Checks EPUB3 (properties="cover-image"), EPUB2 (<meta name="cover">), and
+    common fallback (item id containing "cover" with image media-type).
+    """
+    opf_root, opf_dir, namelist = _parse_opf(path)
+    if opf_root is None:
+        logger.warning("Could not parse OPF for cover check: %s", path.name)
+        return False
+
+    opf_ns = "http://www.idpf.org/2007/opf"
+
+    def resolve_href(href: str) -> str:
+        return f"{opf_dir}/{href}" if opf_dir else href
+
+    def href_in_zip(href: str) -> bool:
+        full = resolve_href(href)
+        if full in namelist:
+            return True
+        full_lower = full.lower()
+        return any(n.lower() == full_lower for n in namelist)
+
+    # EPUB3: properties="cover-image"
+    for item in opf_root.findall(f".//{{{opf_ns}}}item"):
+        if "cover-image" in (item.get("properties") or ""):
+            href = item.get("href", "")
+            if href_in_zip(href):
+                logger.debug("Cover found (EPUB3 properties): %s", href)
+                return True
+            logger.warning("Cover href %r declared but missing from archive", href)
+            return False
+
+    # EPUB2: <meta name="cover" content="item-id"/>
+    for meta in opf_root.findall(f".//{{{opf_ns}}}meta"):
+        if meta.get("name") == "cover":
+            cover_id = meta.get("content", "")
+            for item in opf_root.findall(f".//{{{opf_ns}}}item"):
+                if item.get("id") == cover_id:
+                    href = item.get("href", "")
+                    if href_in_zip(href):
+                        logger.debug("Cover found (EPUB2 meta): %s", href)
+                        return True
+                    logger.warning("Cover href %r declared but missing from archive", href)
+                    return False
+
+    # Fallback: item id contains "cover" with image media-type
+    for item in opf_root.findall(f".//{{{opf_ns}}}item"):
+        item_id = (item.get("id") or "").lower()
+        media = item.get("media-type") or ""
+        if "cover" in item_id and "image" in media:
+            href = item.get("href", "")
+            if href_in_zip(href):
+                logger.debug("Cover found (fallback id): %s", href)
+                return True
+
+    logger.warning("No cover image found in EPUB manifest: %s", path.name)
+    return False
 
 
 def _titles_match(expected: str, actual: str) -> bool:
@@ -74,7 +145,7 @@ def _titles_match(expected: str, actual: str) -> bool:
         return re.sub(r"[^\w]", "", s.lower())
     a, b = norm(expected), norm(actual)
     if not a or not b:
-        return True  # can't compare, assume OK
+        return True
     return a in b or b in a
 
 
@@ -101,20 +172,21 @@ def download_book(book: dict, dest_dir: str | None = None) -> tuple[Path | None,
         source, book_id, book_hash, title, author,
     )
 
-    print(f"  ⏳ Resolving download URL …")
     url = resolve_url(book)
     if not url:
         logger.error("Could not resolve download URL: source=%s id=%s title=%r", source, book_id, title)
-        print("  ❌ Could not resolve a download URL.")
         return None, None
 
     logger.info("Download URL resolved: %s", url)
 
     ext = book.get("extension", "epub").lower()
-    filename = _sanitise_filename(f"{title} - {author}".strip(" -")) + f".{ext}"
+    # Format: "Author - Title.ext" with ASCII-safe chars
+    author_part = _sanitise_filename(author)
+    title_part = _sanitise_filename(title)
+    base = f"{author_part} - {title_part}".strip(" -") or "book"
+    filename = base + f".{ext}"
     filepath = dest / filename
 
-    print(f"  ⬇️  Downloading: {filename}")
     try:
         resp = requests.get(url, stream=True, timeout=120, allow_redirects=True)
         logger.info("HTTP %s for %s (final URL: %s)", resp.status_code, filename, resp.url)
@@ -132,7 +204,8 @@ def download_book(book: dict, dest_dir: str | None = None) -> tuple[Path | None,
                     bar = "█" * (pct // 3) + "░" * (33 - pct // 3)
                     print(f"\r  [{bar}] {pct}%", end="", flush=True)
 
-        print(f"\n  ✅ Saved to: {filepath}")
+        print()
+        logger.info("Saved %s (%.2f MB)", filepath.name, downloaded / 1024 / 1024)
 
         # Verify EPUB metadata matches expected book
         warning = None
@@ -155,7 +228,7 @@ def download_book(book: dict, dest_dir: str | None = None) -> tuple[Path | None,
         return filepath, warning
 
     except Exception as e:
-        print(f"\n  ❌ Download failed: {e}")
+        logger.error("Download failed: %s", e)
         if filepath.exists():
             filepath.unlink()
         return None, None
