@@ -48,6 +48,17 @@ def get_default_format(chat_id: int) -> str | None:
     return get(chat_id).get("default_format")
 
 
+def set_search_source(chat_id: int, source: str) -> None:
+    """source: 'both' | 'zlibrary' | 'libgen'"""
+    data = _load()
+    data.setdefault(str(chat_id), {})["search_source"] = source
+    _save(data)
+
+
+def get_search_source(chat_id: int) -> str:
+    return get(chat_id).get("search_source", "both")
+
+
 def get_status(chat_id: int) -> str | None:
     """Returns 'approved', 'pending', 'rejected', or None if unknown user."""
     return get(chat_id).get("status")

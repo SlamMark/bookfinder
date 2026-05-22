@@ -39,10 +39,12 @@ from user_settings import (
     get,
     get_default_format,
     get_kindle_email,
+    get_search_source,
     get_status,
     register_user,
     set_default_format,
     set_kindle_email,
+    set_search_source,
     set_status,
 )
 
@@ -132,6 +134,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "*Comandos:*\n"
         "/setkindle `email@kindle.com` — guarda tu email de Kindle\n"
         "/setformat — elige tu formato por defecto\n"
+        "/setsource — elige dónde buscar (Z-Library, Libgen o ambas)\n"
         "/testkindle — envía un archivo de prueba a tu Kindle",
         parse_mode="Markdown",
     )
@@ -206,6 +209,50 @@ async def handle_setfmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     fmt = callback.data.split(":")[1]
     set_default_format(chat_id, fmt)
     await callback.edit_message_text(f"✅ Formato por defecto guardado: *{fmt.upper()}*", parse_mode="Markdown")
+
+
+_SOURCE_LABELS = {
+    "both":     "🔀 Ambas (Z-Library + Libgen)",
+    "zlibrary": "🟡 Solo Z-Library",
+    "libgen":   "🟢 Solo Libgen",
+}
+
+
+async def cmd_setsource(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        return
+
+    chat_id = update.effective_chat.id
+    current = get_search_source(chat_id)
+
+    buttons = [
+        [InlineKeyboardButton(
+            f"✓ {label}" if key == current else label,
+            callback_data=f"setsrc:{key}",
+        )]
+        for key, label in _SOURCE_LABELS.items()
+    ]
+    await update.message.reply_text(
+        f"🔍 Fuente de búsqueda actual: *{_SOURCE_LABELS[current]}*\n\nElige una fuente:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_setsrc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _check_access(update, context):
+        await update.callback_query.answer()
+        return
+
+    callback = update.callback_query
+    await callback.answer()
+    chat_id = update.effective_chat.id
+    source = callback.data.split(":")[1]
+    set_search_source(chat_id, source)
+    await callback.edit_message_text(
+        f"✅ Fuente de búsqueda guardada: *{_SOURCE_LABELS[source]}*",
+        parse_mode="Markdown",
+    )
 
 
 # ── Approve / Reject ──────────────────────────────────────────────────────────
@@ -314,18 +361,22 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.message.text.strip()
     chat_id = update.effective_chat.id
 
+    source = get_search_source(chat_id)
     msg = await update.message.reply_text(f"🔍 Buscando {query}…")
 
     total_fetch = BOT_MAX_RESULTS * 5
     results: list[dict] = []
-    try:
-        results.extend(search_zlibrary(query, max_results=total_fetch))
-    except Exception as e:
-        logger.warning("Z-Library error: %s", e)
 
-    if len(results) < total_fetch:
+    if source in ("both", "zlibrary"):
         try:
-            results.extend(search_libgen(query, max_results=total_fetch - len(results)))
+            results.extend(search_zlibrary(query, max_results=total_fetch))
+        except Exception as e:
+            logger.warning("Z-Library error: %s", e)
+
+    if source in ("both", "libgen"):
+        remaining = total_fetch - len(results) if source == "both" else total_fetch
+        try:
+            results.extend(search_libgen(query, max_results=remaining))
         except Exception as e:
             logger.warning("Libgen error: %s", e)
 
@@ -770,6 +821,7 @@ def main() -> None:
     app.add_handler(CommandHandler("myid",        cmd_myid))
     app.add_handler(CommandHandler("setkindle",   cmd_setkindle))
     app.add_handler(CommandHandler("setformat",   cmd_setformat))
+    app.add_handler(CommandHandler("setsource",   cmd_setsource))
     app.add_handler(CommandHandler("testkindle",  cmd_testkindle))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search))
@@ -779,6 +831,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_send_menu,     pattern=r"^send:\d+$"))
     app.add_handler(CallbackQueryHandler(handle_fmt,           pattern=r"^fmt:(dl|snd):\d+:\w+$"))
     app.add_handler(CallbackQueryHandler(handle_setfmt,        pattern=r"^setfmt:\w+$"))
+    app.add_handler(CallbackQueryHandler(handle_setsrc,        pattern=r"^setsrc:\w+$"))
     app.add_handler(CallbackQueryHandler(handle_cancel_fmt,    pattern=r"^cancel_fmt$"))
     app.add_handler(CallbackQueryHandler(handle_back,          pattern=r"^back$"))
     app.add_handler(CallbackQueryHandler(handle_page,          pattern=r"^page:\d+$"))
