@@ -621,18 +621,24 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         await callback.edit_message_text(f"📨 Enviando al Kindle `{kindle_email}`…", parse_mode="Markdown")
         loop = asyncio.get_event_loop()
-        smtp_error = await loop.run_in_executor(None, send_to_kindle, kindle_email, path, title)
+        smtp_error, send_info = await loop.run_in_executor(None, send_to_kindle, kindle_email, path, title)
         path.unlink(missing_ok=True)
 
         if smtp_error is None:
             await callback.edit_message_text(
                 f"✅ *{title}* enviado a `{kindle_email}` en {fmt.upper()}.\n\n"
-                f"Aparecerá en tu Kindle en unos minutos.",
+                f"📁 Archivo: `{send_info['filename']}` ({send_info['size_mb']} MB)\n"
+                f"📤 Remitente: `{send_info['sender']}`\n\n"
+                f"⚠️ Si no llega en 10 min, verifica que `{send_info['sender']}` esté en la lista de "
+                f"[remitentes aprobados de Amazon](https://www.amazon.com/myk#/settings/personalDocument/approvedSenders).",
                 parse_mode="Markdown",
+                disable_web_page_preview=True,
             )
         else:
             await callback.edit_message_text(
                 f"❌ Error al enviar al Kindle:\n{smtp_error}\n\n"
+                f"📁 Archivo: `{send_info['filename']}` ({send_info['size_mb']} MB)\n"
+                f"📤 Remitente: `{send_info['sender']}`\n\n"
                 f"Prueba `/testkindle` para diagnosticar el problema.",
                 parse_mode="Markdown",
             )
@@ -669,25 +675,25 @@ async def cmd_testkindle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     loop = asyncio.get_event_loop()
-    smtp_error = await loop.run_in_executor(None, send_to_kindle, kindle_email, tmp, "BookFinder Test")
+    smtp_error, send_info = await loop.run_in_executor(None, send_to_kindle, kindle_email, tmp, "BookFinder Test")
     tmp.unlink(missing_ok=True)
 
     if smtp_error is None:
         await msg.edit_text(
             f"✅ *Prueba enviada correctamente*\n\n"
             f"📧 Kindle: `{kindle_email}`\n"
-            f"📤 Desde: `{sender}`\n\n"
+            f"📤 Desde: `{send_info['sender']}`\n\n"
             f"Comprueba tu Kindle en unos minutos.\n"
-            f"Si no llega, verifica que `{sender}` está en tu lista de remitentes aprobados en Amazon.",
+            f"Si no llega, verifica que `{send_info['sender']}` está en tu lista de remitentes aprobados en Amazon.",
             parse_mode="Markdown",
         )
     else:
         await msg.edit_text(
             f"❌ *Error al enviar*\n\n"
             f"📧 Kindle: `{kindle_email}`\n"
-            f"📤 Desde: `{sender}`\n\n"
+            f"📤 Desde: `{send_info['sender']}`\n\n"
             f"⚠️ {smtp_error}\n\n"
-            f"Asegúrate de que `{sender}` está en tu lista de remitentes aprobados en Amazon:\n"
+            f"Asegúrate de que `{send_info['sender']}` está en tu lista de remitentes aprobados en Amazon:\n"
             f"_Amazon → Manage Your Content → Preferences → Personal Document Settings_",
             parse_mode="Markdown",
         )

@@ -17,18 +17,33 @@ from config import SMTP_FROM, SMTP_HOST, SMTP_PASS, SMTP_PORT, SMTP_USER
 logger = logging.getLogger(__name__)
 
 
-def send_to_kindle(kindle_email: str, file_path: Path, title: str) -> str | None:
+KINDLE_MAX_BYTES = 50 * 1024 * 1024  # Amazon's 50 MB email limit
+
+
+def send_to_kindle(kindle_email: str, file_path: Path, title: str) -> tuple[str | None, dict]:
     """
     Send file_path as an email attachment to kindle_email.
 
-    Returns None on success, or a human-readable error string on failure.
+    Returns (error_str | None, info_dict).
+    error_str is None on success; info_dict always contains sender, size_mb, filename.
     The sender (SMTP_FROM) must be in the recipient's Amazon approved email list.
     """
+    sender = SMTP_FROM or SMTP_USER or ""
+    file_size = file_path.stat().st_size if file_path.exists() else 0
+    info = {
+        "sender": sender,
+        "size_mb": round(file_size / 1024 / 1024, 2),
+        "filename": file_path.name,
+    }
+
     if not all([SMTP_HOST, SMTP_USER, SMTP_PASS]):
-        return "SMTP no configurado en el servidor (faltan SMTP_HOST, SMTP_USER o SMTP_PASS)."
+        return "SMTP no configurado en el servidor (faltan SMTP_HOST, SMTP_USER o SMTP_PASS).", info
+
+    if file_size > KINDLE_MAX_BYTES:
+        return f"Archivo demasiado grande ({info['size_mb']} MB). Amazon acepta máximo 50 MB.", info
 
     msg = MIMEMultipart()
-    msg["From"] = SMTP_FROM or SMTP_USER
+    msg["From"] = sender
     msg["To"] = kindle_email
     msg["Subject"] = title
 
@@ -45,13 +60,13 @@ def send_to_kindle(kindle_email: str, file_path: Path, title: str) -> str | None
             smtp.starttls()
             smtp.login(SMTP_USER, SMTP_PASS)
             smtp.send_message(msg)
-        logger.info("Sent '%s' to %s", file_path.name, kindle_email)
-        return None
+        logger.info("Sent '%s' (%.2f MB) → %s (from %s)", file_path.name, info["size_mb"], kindle_email, sender)
+        return None, info
     except smtplib.SMTPAuthenticationError:
-        return "Autenticación SMTP fallida — revisa SMTP_USER y SMTP_PASS en el servidor."
+        return "Autenticación SMTP fallida — revisa SMTP_USER y SMTP_PASS en el servidor.", info
     except smtplib.SMTPRecipientsRefused:
-        return f"Dirección Kindle rechazada por el servidor: `{kindle_email}`"
+        return f"Dirección Kindle rechazada por el servidor: `{kindle_email}`", info
     except smtplib.SMTPException as e:
-        return f"Error SMTP: {e}"
+        return f"Error SMTP: {e}", info
     except OSError as e:
-        return f"No se pudo conectar al servidor SMTP ({SMTP_HOST}:{SMTP_PORT}): {e}"
+        return f"No se pudo conectar al servidor SMTP ({SMTP_HOST}:{SMTP_PORT}): {e}", info
