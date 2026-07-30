@@ -6,11 +6,15 @@ Returns a normalised list of book dicts.
 """
 
 from __future__ import annotations
+
+import logging
 from typing import Optional
 
 from libgen_api_enhanced import LibgenSearch, SearchTopic
 
 from config import LIBGEN_MIRROR
+
+logger = logging.getLogger(__name__)
 
 
 # ── Language mapping ─────────────────────────────────────────────────────────
@@ -53,7 +57,10 @@ def _book_to_dict(book, source_topic: str) -> dict:
         "size":      getattr(book, "size", ""),
         "pages":     getattr(book, "pages", ""),
         "publisher": getattr(book, "publisher", ""),
-        "isbn":      getattr(book, "isbn", "") or "",  # used to match covers exactly
+        # Libgen ships a cover with each record — always right for that file,
+        # unlike anything matched by title. It exposes no ISBN.
+        "cover":     getattr(book, "cover_url", "") or "",
+        "isbn":      "",
         "md5":       getattr(book, "md5", ""),
         "mirrors":   getattr(book, "mirrors", []),
         "_book_obj": book,  # keep original for download resolution
@@ -110,15 +117,26 @@ def search_libgen(
         for book in books or []:
             results.append(_book_to_dict(book, topic_label))
 
-    # Deduplicate by md5
+    # Drop malformed rows and deduplicate by md5.
+    # Libgen's HTML occasionally parses with the columns shifted: no title, no
+    # md5, and the size sitting in the extension field. Those can't be
+    # downloaded and would show as blank buttons, so they're discarded.
     seen_md5: set[str] = set()
     unique: list[dict] = []
+    dropped = 0
     for r in results:
         md5 = r.get("md5", "")
-        if md5 and md5 in seen_md5:
+        if not r.get("title") or not md5:
+            dropped += 1
+            continue
+        if md5 in seen_md5:
             continue
         seen_md5.add(md5)
         unique.append(r)
+
+    if dropped:
+        logger.info("Libgen: dropped %d malformed rows for %r", dropped, query)
+    logger.info("Libgen returned %d results for %r", len(unique), query)
 
     return unique[:max_results]
 

@@ -555,21 +555,18 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     keyboard = _detail_keyboard(idx)
     loop = asyncio.get_event_loop()
 
-    cover_url = None
-    if book["source"] == "zlibrary":
-        cover_url = (
-            (book.get("_zlib_item") or {}).get("cover")
-            or (info or {}).get("book", {}).get("cover")
-        )
+    # Prefer the cover the backend ships with the record: it belongs to this
+    # exact file, so it can't be the wrong book
+    cover_url = book.get("cover") or (info or {}).get("book", {}).get("cover")
 
     if not cover_url:
-        # Libgen never supplies one, and Z-Library sometimes doesn't either
+        # Nothing supplied — fall back to matching one on Open Library
         cover_url = await loop.run_in_executor(
             None, find_cover_url,
             book.get("title", ""), book.get("author", ""), book.get("isbn", ""),
         )
         if cover_url:
-            # Say where it came from: this one is matched, not supplied with the file
+            # Say where it came from: this one is matched, not supplied
             text += "\n\n🖼 _Portada vía Open Library_"
 
     await _send_detail(context, chat_id, text, keyboard, cover_url)
