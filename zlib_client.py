@@ -7,9 +7,34 @@ Original: https://github.com/bipinkrish/Zlibrary-API (MIT, Bipinkrish 2023-2024)
 Modifications:
 - Configurable domain (default: z-library.sk).
 - Added getDownloadLink() for URL-only resolution.
+- Raise ZlibraryError on non-JSON replies instead of a bare JSONDecodeError.
 """
 
 import requests
+
+
+class ZlibraryError(RuntimeError):
+    """The API replied with something that isn't JSON."""
+
+
+def _parse(response: requests.Response, url: str) -> dict:
+    """
+    Decode a JSON reply, or explain what came back instead.
+
+    When Z-Library moves domain or a proxy intercepts the request, the reply is
+    an HTML page and .json() raises 'Expecting value: line 1 column 1', which
+    says nothing about the actual problem. Report the status, the final URL
+    after redirects, and the start of the body instead.
+    """
+    ctype = response.headers.get("content-type", "")
+    if "json" not in ctype.lower():
+        snippet = " ".join(response.text[:200].split())
+        raise ZlibraryError(
+            f"{url} replied HTTP {response.status_code} as {ctype or 'unknown type'} "
+            f"instead of JSON — the domain may have moved or be blocked. "
+            f"Final URL: {response.url} · Body starts: {snippet!r}"
+        )
+    return response.json()
 
 
 class Zlibrary:
@@ -70,24 +95,28 @@ class Zlibrary:
     def __makePostRequest(self, url, data=None, override=False):
         if not self.isLoggedIn() and not override:
             return {"success": False, "error": "Not logged in"}
-        return requests.post(
-            "https://" + self.__domain + url,
+        full_url = "https://" + self.__domain + url
+        response = requests.post(
+            full_url,
             data=data or {},
             cookies=self.__cookies,
             headers=self.__headers,
             timeout=30,
-        ).json()
+        )
+        return _parse(response, full_url)
 
     def __makeGetRequest(self, url, params=None, cookies=None):
         if not self.isLoggedIn() and cookies is None:
             return {"success": False, "error": "Not logged in"}
-        return requests.get(
-            "https://" + self.__domain + url,
+        full_url = "https://" + self.__domain + url
+        response = requests.get(
+            full_url,
             params=params or {},
             cookies=self.__cookies if cookies is None else cookies,
             headers=self.__headers,
             timeout=30,
-        ).json()
+        )
+        return _parse(response, full_url)
 
     def isLoggedIn(self):
         return self.__loggedin
