@@ -52,6 +52,37 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
+
+# httpx logs every request URL at INFO, and Telegram puts the bot token in the
+# path — that would print the token on every poll, a few times a minute.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+class _RedactToken(logging.Filter):
+    """
+    Mask the bot token anywhere it still reaches a log record.
+
+    Silencing httpx covers the polling loop, but the token also travels in
+    error messages from the Telegram library, which we do want to see. This
+    catches those too, so the token can't leak by a route we didn't predict.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not TELEGRAM_TOKEN:
+            return True
+        if isinstance(record.msg, str) and TELEGRAM_TOKEN in record.msg:
+            record.msg = record.msg.replace(TELEGRAM_TOKEN, "<TOKEN>")
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                a.replace(TELEGRAM_TOKEN, "<TOKEN>") if isinstance(a, str) else a
+                for a in record.args
+            )
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RedactToken())
+
 logger = logging.getLogger(__name__)
 
 _sessions: dict[int, dict] = {}   # {chat_id: {results, page, query}}
