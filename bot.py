@@ -31,7 +31,7 @@ from telegram.ext import (
 
 from config import TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, BOT_MAX_RESULTS, SMTP_FROM, SMTP_USER
 from converter import KINDLE_EMAIL_FORMATS, SUPPORTED_FORMATS, convert, set_epub_metadata
-from downloader import check_epub_cover, download_book
+from downloader import check_epub_cover, download_book, fetch_image
 from mailer import send_to_kindle
 from searcher_libgen import search_libgen
 from searcher_zlib import get_book_details, search_zlibrary
@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 _sessions: dict[int, dict] = {}   # {chat_id: {results, page, query}}
 TELEGRAM_MAX_FILE_MB = 50
+TELEGRAM_CAPTION_LIMIT = 1024     # messages allow 4096, photo captions only 1024
 
 
 def _safe(text) -> str:
@@ -64,6 +65,26 @@ def _safe(text) -> str:
 
 def _is_admin(chat_id: int) -> bool:
     return TELEGRAM_ADMIN_ID and chat_id == TELEGRAM_ADMIN_ID
+
+
+async def _session_books(callback, chat_id: int, idx: int | None = None) -> list[dict] | None:
+    """
+    Return this chat's search results, or None if the session is gone.
+
+    Searches live in memory, so a bot restart drops them and every button from
+    an older message goes stale. Answers the callback either way — with an
+    alert when expired, so the button never looks simply dead. Callers must not
+    answer the query themselves first: Telegram honours only the first answer.
+    """
+    books = _sessions.get(chat_id, {}).get("results", [])
+    if not books or (idx is not None and idx >= len(books)):
+        await callback.answer(
+            "Sesión expirada. Escríbeme el título otra vez para buscarlo de nuevo.",
+            show_alert=True,
+        )
+        return None
+    await callback.answer()
+    return books
 
 
 # ── Access control ────────────────────────────────────────────────────────────
@@ -179,11 +200,14 @@ async def cmd_setkindle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     set_kindle_email(chat_id, email)
+    sender = SMTP_FROM or SMTP_USER or "_(no configurado en el servidor)_"
     await update.message.reply_text(
         f"✅ Kindle email guardado: `{email}`\n\n"
-        f"Recuerda añadir `{email.split('@')[0] if 'SMTP_FROM' not in email else ''}` "
-        f"a tu lista de emails aprobados en Amazon:\n"
-        f"Amazon → Manage Your Content → Preferences → Approved Personal Document E-mail List",
+        f"Recuerda añadir este remitente a tu lista de emails aprobados en Amazon:\n"
+        f"`{sender}`\n\n"
+        f"_Amazon → Manage Your Content and Devices → Preferences → "
+        f"Personal Document Settings → Approved Personal Document E-mail List_\n\n"
+        f"Después prueba el envío con /testkindle",
         parse_mode="Markdown",
     )
 
@@ -473,14 +497,11 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     callback = update.callback_query
-    await callback.answer()
-
     chat_id = update.effective_chat.id
     idx = int(callback.data.split(":")[1])
-    books = _sessions.get(chat_id, {}).get("results", [])
 
-    if idx >= len(books):
-        await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
+    books = await _session_books(callback, chat_id, idx)
+    if books is None:
         return
 
     book = books[idx]
@@ -498,15 +519,55 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             (book.get("_zlib_item") or {}).get("cover")
             or (info or {}).get("book", {}).get("cover")
         )
+        if not cover_url:
+            logger.info("No cover URL in Z-Library data for %r", book.get("title"))
 
-    send_kwargs = dict(chat_id=chat_id, reply_markup=keyboard, parse_mode="Markdown")
+    await _send_detail(context, chat_id, text, keyboard, cover_url)
+
+
+async def _send_detail(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+    keyboard: InlineKeyboardMarkup,
+    cover_url: str | None,
+) -> None:
+    """
+    Send the detail card, with the cover as a photo whenever possible.
+
+    The cover bytes are fetched here rather than handing Telegram the URL —
+    Telegram fetches URLs from its own servers and the Z-Library CDN blocks
+    those. If the card is longer than a photo caption allows, the cover is
+    sent first and the full text follows as its own message with the buttons.
+    """
+    photo: bytes | str | None = None
     if cover_url:
+        loop = asyncio.get_event_loop()
+        photo = await loop.run_in_executor(None, fetch_image, cover_url)
+        if photo is None:
+            # Our own fetch failed — let Telegram try the URL as a last resort
+            photo = cover_url
+
+    if photo and len(text) <= TELEGRAM_CAPTION_LIMIT:
         try:
-            await context.bot.send_photo(photo=cover_url, caption=text, **send_kwargs)
+            await context.bot.send_photo(
+                chat_id=chat_id, photo=photo, caption=text,
+                reply_markup=keyboard, parse_mode="Markdown",
+            )
             return
         except Exception as e:
-            logger.warning("Cover photo failed: %s", e)
-    await context.bot.send_message(text=text, **send_kwargs)
+            logger.warning("send_photo with caption failed: %s", e)
+
+    elif photo:
+        logger.info("Detail text is %d chars — sending cover separately", len(text))
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=photo)
+        except Exception as e:
+            logger.warning("send_photo failed: %s", e)
+
+    await context.bot.send_message(
+        chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode="Markdown",
+    )
 
 
 # ── Format selection (shared for download and send) ───────────────────────────
@@ -515,7 +576,8 @@ def _format_keyboard(idx: int, action: str, original_fmt: str, default_fmt: str 
     """
     action: 'dl' for download, 'snd' for send.
     Marks default format with ✓, original book format with (original).
-    Send uses KINDLE_EMAIL_FORMATS only (Amazon dropped MOBI support in 2022).
+    Send offers KINDLE_EMAIL_FORMATS, which excludes MOBI — Amazon stopped
+    accepting it for personal documents in 2022.
     """
     formats = KINDLE_EMAIL_FORMATS if action == "snd" else SUPPORTED_FORMATS
     buttons = []
@@ -542,13 +604,10 @@ async def _show_format_menu(
     action_label: str,    # 'Descargar' or 'Enviar al Kindle'
 ) -> None:
     callback = update.callback_query
-    await callback.answer()
-
     chat_id = update.effective_chat.id
-    books = _sessions.get(chat_id, {}).get("results", [])
 
-    if idx >= len(books):
-        await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
+    books = await _session_books(callback, chat_id, idx)
+    if books is None:
         return
 
     book = books[idx]
@@ -633,15 +692,13 @@ async def handle_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     callback = update.callback_query
-    await callback.answer()
 
     _, action, idx_str, fmt = callback.data.split(":")
     idx = int(idx_str)
     chat_id = update.effective_chat.id
-    books = _sessions.get(chat_id, {}).get("results", [])
 
-    if idx >= len(books):
-        await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
+    books = await _session_books(callback, chat_id, idx)
+    if books is None:
         return
 
     book = books[idx]
@@ -802,14 +859,12 @@ async def handle_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     callback = update.callback_query
-    await callback.answer()
-
     chat_id = update.effective_chat.id
-    session = _sessions.get(chat_id)
-    if not session:
-        await callback.answer("Sesión expirada. Haz una nueva búsqueda.", show_alert=True)
+
+    if await _session_books(callback, chat_id) is None:
         return
 
+    session = _sessions[chat_id]
     session["page"] = int(callback.data.split(":")[1])
     await callback.edit_message_text(
         f"📚 *{_safe(session['query'])}* — elige un resultado:",

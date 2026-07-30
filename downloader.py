@@ -39,6 +39,54 @@ def resolve_url(book: dict) -> str | None:
     return None
 
 
+# ── Cover images ─────────────────────────────────────────────────────────────
+
+_IMAGE_HEADERS = {
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    "referer": "https://z-library.sk/",
+}
+
+MAX_COVER_BYTES = 8 * 1024 * 1024  # Telegram rejects photo uploads over 10 MB
+
+
+def fetch_image(url: str) -> bytes | None:
+    """
+    Download an image and return its bytes, or None on failure.
+
+    Passing a URL to Telegram makes *Telegram's* servers fetch it, which the
+    Z-Library CDN rejects. Fetching the bytes here and uploading them instead
+    sidesteps that.
+    """
+    try:
+        resp = requests.get(url, headers=_IMAGE_HEADERS, timeout=20, stream=True)
+        resp.raise_for_status()
+
+        ctype = resp.headers.get("content-type", "")
+        if not ctype.startswith("image/"):
+            logger.warning("Cover URL returned %r, not an image: %s", ctype or "?", url)
+            return None
+
+        data = b""
+        for chunk in resp.iter_content(chunk_size=8192):
+            data += chunk
+            if len(data) > MAX_COVER_BYTES:
+                logger.warning("Cover exceeds %d bytes, skipping: %s", MAX_COVER_BYTES, url)
+                return None
+
+        if not data:
+            logger.warning("Cover URL returned an empty body: %s", url)
+            return None
+
+        logger.debug("Cover fetched: %d bytes from %s", len(data), url)
+        return data
+
+    except Exception as e:
+        logger.warning("Cover fetch failed for %s: %s", url, e)
+        return None
+
+
 def _parse_opf(path: Path) -> tuple[ET.Element | None, str, list[str]]:
     """
     Open EPUB and return (opf_root, opf_dir, zip_namelist).

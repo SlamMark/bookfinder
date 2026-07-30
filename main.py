@@ -141,13 +141,17 @@ def main():
         sys.exit(0)
 
     print(f"\n  📖 Selected: {BOLD}{book['title']}{RESET} — {book['author']}")
-    result = download_book(book)
+    path, warning = download_book(book)
 
-    if result:
-        print(f"\n  🎉 Done! File ready at: {BOLD}{result}{RESET}\n")
-    else:
+    if path is None:
         print(f"\n  {RED}Download failed. Try another result.{RESET}\n")
         sys.exit(1)
+
+    if warning:
+        # The warning is formatted for Telegram — drop its Markdown for the terminal
+        print(f"\n  {YELLOW}{warning.replace('*', '').replace('_', '')}{RESET}")
+
+    print(f"\n  🎉 Done! File ready at: {BOLD}{path}{RESET}\n")
 
 
 if __name__ == "__main__":

@@ -12,9 +12,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Offered for direct download to Telegram
 SUPPORTED_FORMATS = ["epub", "mobi", "azw3", "pdf"]
 
-KINDLE_EMAIL_FORMATS = ["epub", "mobi", "azw3", "pdf"]
+# Offered for Send to Kindle. No MOBI: Amazon stopped accepting it for personal
+# documents in August 2022 and silently discards the email.
+KINDLE_EMAIL_FORMATS = ["epub", "azw3", "pdf"]
 
 
 def set_epub_metadata(path: Path, title: str, author: str) -> bool:
