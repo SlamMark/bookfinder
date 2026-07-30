@@ -30,6 +30,7 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_TOKEN, TELEGRAM_ADMIN_ID, BOT_MAX_RESULTS, SMTP_FROM, SMTP_USER
+from covers import find_cover_url
 from converter import KINDLE_EMAIL_FORMATS, SUPPORTED_FORMATS, convert, set_epub_metadata
 from downloader import check_epub_cover, download_book, fetch_image
 from mailer import send_to_kindle
@@ -552,6 +553,7 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     text = _format_detail(book, info)
     keyboard = _detail_keyboard(idx)
+    loop = asyncio.get_event_loop()
 
     cover_url = None
     if book["source"] == "zlibrary":
@@ -559,8 +561,16 @@ async def handle_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             (book.get("_zlib_item") or {}).get("cover")
             or (info or {}).get("book", {}).get("cover")
         )
-        if not cover_url:
-            logger.info("No cover URL in Z-Library data for %r", book.get("title"))
+
+    if not cover_url:
+        # Libgen never supplies one, and Z-Library sometimes doesn't either
+        cover_url = await loop.run_in_executor(
+            None, find_cover_url,
+            book.get("title", ""), book.get("author", ""), book.get("isbn", ""),
+        )
+        if cover_url:
+            # Say where it came from: this one is matched, not supplied with the file
+            text += "\n\n🖼 _Portada vía Open Library_"
 
     await _send_detail(context, chat_id, text, keyboard, cover_url)
 

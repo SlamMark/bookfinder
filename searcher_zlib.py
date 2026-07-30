@@ -92,6 +92,8 @@ def _book_to_dict(item: dict) -> dict:
         "size":      item.get("filesizeString", "") or str(item.get("filesize", "")),
         "pages":     str(item.get("pages", "")),
         "publisher": item.get("publisher", ""),
+        # Z-Library puts ISBNs in "identifier", sometimes several comma-separated
+        "isbn":      item.get("identifier", "") or item.get("isbn", "") or "",
         "md5":       item.get("md5", ""),
         "mirrors":   [],
         "_zlib_item": item,  # keep original for download resolution

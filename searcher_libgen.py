@@ -53,6 +53,7 @@ def _book_to_dict(book, source_topic: str) -> dict:
         "size":      getattr(book, "size", ""),
         "pages":     getattr(book, "pages", ""),
         "publisher": getattr(book, "publisher", ""),
+        "isbn":      getattr(book, "isbn", "") or "",  # used to match covers exactly
         "md5":       getattr(book, "md5", ""),
         "mirrors":   getattr(book, "mirrors", []),
         "_book_obj": book,  # keep original for download resolution

@@ -11,7 +11,10 @@ Búsqueda combinada en Z-Library + Libgen con tabla de resultados y descarga
 interactiva por número.
 
 - `main.py` — entrada CLI (`--lang`, `--max`, `--libgen-only`, `--zlib-only`)
-- `searcher_zlib.py` — Z-Library (se consulta primero)
+- `searcher_zlib.py` — Z-Library (se consulta primero). Dominio configurable
+  con `ZLIB_DOMAIN`: lo rotan a menudo y `z-library.sk` dejó de servir `/eapi/`
+  detrás de una verificación anti-bot (HTTP 513); `z-lib.fm` sí responde
+- `covers.py` — búsqueda de portadas en Open Library
 - `searcher_libgen.py` — Libgen vía `libgen-api-enhanced` (fiction + non-fiction, dedup por md5)
 - `zlib_client.py` — cliente vendorizado de los endpoints oficiales `/eapi/`
 - `downloader.py` — resolución de URL + descarga con barra de progreso
@@ -58,6 +61,32 @@ Por **email SMTP**, no por USB (el plan original contemplaba USB; se descartó).
 - `docker-compose.yml` — volúmenes `./downloads` y `./data`, `restart: unless-stopped`
 - `.github/workflows/deploy.yml` — en cada push a `main`: Tailscale → SSH al LXC →
   `git pull && docker compose up -d --build`
+
+## Portadas (`covers.py`)
+
+Libgen nunca da portada y Z-Library sólo la da mientras su API responda, así
+que las portadas se buscan en **Open Library** (Internet Archive), pública y
+sin cuenta. Se consulta sólo cuando el resultado no trae portada propia, y la
+ficha indica "Portada vía Open Library" cuando viene de ahí.
+
+El emparejamiento es **estricto a propósito**: una portada equivocada es peor
+que ninguna. Se acepta un candidato sólo si coincide el ISBN — que identifica
+una edición exacta — o si coinciden título *y* autor tras normalizar acentos,
+mayúsculas y puntuación. Comprobado: "Children of Dune" recibe su propia
+portada y no la de "Dune".
+
+Dos detalles no evidentes de la API:
+- El parámetro `title` casa de forma casi literal, así que un título con
+  subtítulo no encuentra nada. Se reintenta con el título principal y, como
+  último recurso, con búsqueda libre `q=`
+- El orden por relevancia es flojo: buscar "Dune" devuelve antes "Children of
+  Dune". Por eso se piden 20 candidatos y se filtran, en vez de fiarse de los
+  primeros
+
+Limitación conocida: Open Library indexa las obras mayormente por su título
+original, así que un título traducido ("El nombre del viento") no encuentra
+nada, porque allí es "The Name of the Wind". Se prefiere no mostrar portada
+antes que mostrar la de otra edición.
 
 ## Gotchas aprendidos
 
