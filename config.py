@@ -20,6 +20,9 @@ if _env_path.exists():
 ZLIB_EMAIL = os.environ.get("ZLIB_EMAIL", "")
 ZLIB_PASSWORD = os.environ.get("ZLIB_PASSWORD", "")
 
+# Z-Library rotates domains — override here if the default stops resolving
+ZLIB_DOMAIN = os.environ.get("ZLIB_DOMAIN", "z-library.sk")
+
 # ── Download settings ────────────────────────────────────────────────────────
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", str(Path(__file__).parent / "downloads"))
 

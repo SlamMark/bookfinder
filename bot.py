@@ -433,10 +433,13 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     total_fetch = BOT_MAX_RESULTS * 5
     results: list[dict] = []
+    n_zlib = 0
 
     if source in ("both", "zlibrary"):
         try:
-            results.extend(search_zlibrary(query, max_results=total_fetch))
+            zlib_results = search_zlibrary(query, max_results=total_fetch)
+            n_zlib = len(zlib_results)
+            results.extend(zlib_results)
         except Exception as e:
             logger.warning("Z-Library error: %s", e)
 
@@ -446,6 +449,12 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             results.extend(search_libgen(query, max_results=remaining))
         except Exception as e:
             logger.warning("Libgen error: %s", e)
+
+    # Only Z-Library results carry a cover, so this line explains a missing one
+    logger.info(
+        "Search %r [source=%s]: %d results (%d Z-Library, %d Libgen)",
+        query, source, len(results), n_zlib, len(results) - n_zlib,
+    )
 
     if not results:
         await msg.edit_text("❌ No encontré nada. Prueba con otro título.")
